@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 use fancy_regex::{Captures, Regex};
+use priority_queue::PriorityQueue;
 
 pub type Token = u16;
 
 pub struct Tokenizer {
     str2token: HashMap<String, Token>,
-    token2str: HashMap<Token, String>,
+    token2str: Vec<String>,
     longest_str: usize,
 }
 
@@ -16,6 +18,33 @@ enum GroupType {
     Digits,
     Spaces,
     Other,
+}
+
+struct ArenaNode {
+    value: Token,
+    prev: Option<usize>,
+    next: Option<usize>,
+}
+
+#[derive(Debug, Eq)]
+pub struct OrdHashSet<T: Hash>(pub HashSet<T>);
+
+impl<T: Hash> PartialEq for OrdHashSet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+    }
+}
+
+impl<T: Hash + Eq> PartialOrd for OrdHashSet<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: Hash + Eq> Ord for OrdHashSet<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.len().cmp(&other.0.len())
+    }
 }
 
 impl Tokenizer {
@@ -32,60 +61,136 @@ impl Tokenizer {
         alphabet.sort();
 
         let mut tokenizer = Self {
-            token2str: alphabet
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (i as Token, t.to_owned()))
-                .collect(),
             str2token: alphabet
                 .iter()
                 .enumerate()
                 .map(|(i, t)| (t.to_owned(), i as Token))
                 .collect(),
             longest_str: alphabet.iter().fold(0, |l, s| std::cmp::max(l, s.len())),
+            token2str: alphabet,
         };
+        println!("tok core done");
 
         if let Some(vocab_size) = vocab_size {
-            let mut chunks: Vec<_> = Tokenizer::chunks(&Tokenizer::normalize(s))
+            let start = std::time::Instant::now();
+            let norm = Tokenizer::normalize(s);
+            println!("normalized in {:?}", std::time::Instant::now() - start);
+            let mut chunks: Vec<Vec<ArenaNode>> = Tokenizer::chunks(&norm)
                 .iter()
-                .map(|str_chunk| tokenizer.encode_normalized(str_chunk))
+                .map(|str_chunk| {
+                    let mut chunk: Vec<ArenaNode> = tokenizer
+                        .encode_normalized(str_chunk)
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &tok)| ArenaNode {
+                            value: tok,
+                            prev: if i > 0 { Some(i - 1) } else { None },
+                            next: Some(i + 1),
+                        })
+                        .collect();
+                    chunk.last_mut().unwrap().next = None;
+                    chunk
+                })
                 .collect();
-            while tokenizer.token2str.len() < vocab_size {
-                let mut counts = HashMap::new();
-                let mut top_key = None;
-                for (i, chunk) in chunks.iter().enumerate() {
-                    for (j, current_pair) in chunk.windows(2).enumerate() {
-                        let e = counts
-                            .entry((current_pair[0], current_pair[1]))
-                            .or_insert(HashSet::new());
-                        e.insert((i, j));
-                        let current_count = e.len();
-                        top_key = match top_key {
-                            Some((a, b)) => {
-                                if counts[&(a, b)].len() < current_count {
-                                    Some((current_pair[0], current_pair[1]))
-                                } else {
-                                    Some((a, b))
-                                }
-                            }
-                            None => Some((current_pair[0], current_pair[1])),
-                        };
-                    }
+            println!("chunking done");
+
+            let mut bootstrap_counts = HashMap::new();
+            for (chunk, chunk_v) in chunks.iter().enumerate() {
+                for (i, pair_first) in chunk_v[..chunk_v.len() - 1]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| a.next.is_some())
+                {
+                    let current_pair = (
+                        pair_first.value,
+                        chunk_v[*pair_first.next.as_ref().unwrap()].value,
+                    );
+                    bootstrap_counts
+                        .entry(current_pair)
+                        .or_insert(HashSet::new())
+                        .insert((chunk, i));
                 }
-                match top_key {
-                    Some((a, b)) => {
-                        let merge_str = tokenizer.token2str.get(&a).unwrap().to_string()
-                            + tokenizer.token2str.get(&b).unwrap();
+            }
+            println!("count construction done");
+            let mut pq_counts = PriorityQueue::new();
+            for (k, v) in bootstrap_counts {
+                pq_counts.push(k, OrdHashSet(v));
+            }
+            while tokenizer.token2str.len() < vocab_size {
+                match pq_counts.peek() {
+                    Some(((pair1, pair2), positions_set)) => {
+                        let merge_str = tokenizer.token2str[*pair1 as usize].to_string()
+                            + &tokenizer.token2str[*pair2 as usize];
                         let token = tokenizer.token2str.len() as Token;
                         tokenizer.longest_str =
                             std::cmp::max(tokenizer.longest_str, merge_str.len());
-                        tokenizer.token2str.insert(token, merge_str.clone());
+                        tokenizer.token2str.push(merge_str.clone());
                         tokenizer.str2token.insert(merge_str, token);
 
-                        let mut positions: Vec<_> = counts.get(&(a, b)).unwrap().iter().collect();
-                        positions.sort_by_key(|(_chunk, _position)| _position);
-                        for (chunk, position) in positions.into_iter().rev() {
-                            chunks[*chunk].splice(position..&(position + 2), [token]);
+                        let mut positions: Vec<_> = positions_set.0.iter().collect();
+                        positions.sort_by_key(|(_chunk, i)| i);
+                        let mut decrements: HashMap<(u16, u16), HashSet<(usize, usize)>> =
+                            HashMap::new();
+                        let mut addons: HashMap<(u16, u16), HashSet<(usize, usize)>> =
+                            HashMap::new();
+                        for (c, first_index) in positions.into_iter().rev() {
+                            if let Some(second_index) = chunks[*c][*first_index].next {
+                                if let Some((left, left_pos)) =
+                                    chunks[*c][*first_index].prev.map(|left_pos| {
+                                        ((chunks[*c][left_pos].value, *pair1), (*c, left_pos))
+                                    })
+                                {
+                                    if let Some(set) = decrements.get_mut(&left) {
+                                        set.insert(left_pos);
+                                    } else {
+                                        decrements.insert(left, HashSet::from([left_pos]));
+                                    }
+
+                                    if let Some(set) = addons.get_mut(&(left.0, token)) {
+                                        set.insert(left_pos);
+                                    } else {
+                                        addons.insert((left.0, token), HashSet::from([left_pos]));
+                                    }
+                                }
+
+                                let current_pos = (*c, *first_index);
+
+                                if let Some((right, right_pos)) =
+                                    chunks[*c][second_index].next.map(|right_2pos| {
+                                        ((*pair2, chunks[*c][right_2pos].value), (*c, second_index))
+                                    })
+                                {
+                                    if let Some(set) = decrements.get_mut(&right) {
+                                        set.insert(right_pos);
+                                    } else {
+                                        decrements.insert(right, HashSet::from([right_pos]));
+                                    }
+
+                                    if let Some(set) = addons.get_mut(&(token, right.1)) {
+                                        set.insert(current_pos);
+                                    } else {
+                                        addons
+                                            .insert((token, right.1), HashSet::from([current_pos]));
+                                    }
+                                }
+
+                                chunks[*c][*first_index].next = chunks[*c][second_index].next;
+                                chunks[*c][*first_index].value = token;
+                                chunks[*c][second_index].next = None;
+                            }
+                        }
+                        pq_counts.remove(&(*pair1, *pair2));
+
+                        for (key, remove) in decrements {
+                            pq_counts.change_priority_by(&key, |priority_set| {
+                                for pos in remove {
+                                    priority_set.0.remove(&pos);
+                                }
+                            });
+                        }
+
+                        for (key, insert) in addons {
+                            pq_counts.push(key, OrdHashSet(insert));
                         }
                     }
                     None => break,
@@ -152,8 +257,7 @@ impl Tokenizer {
     fn denormalize(s: &str) -> String {
         let s = Regex::new(r"(\p{L} *)▁(?=\p{L})|(\p{N} *)▁(?=\p{N})")
             .unwrap()
-            .replace_all(s, "$1$2 ")
-            .to_string();
+            .replace_all(s, "$1$2 ");
         Regex::new(r"(^|[^\p{L}] *)▁(?=\p{L})|(^|[^\p{N}] *)▁(?=\p{N})")
             .unwrap()
             .replace_all(&s, "$1$2")
@@ -194,22 +298,29 @@ impl Tokenizer {
     }
 
     pub fn decode(&self, v: &[Token]) -> String {
-        Tokenizer::denormalize(
-            &v.iter()
-                .map(|t| {
-                    self.token2str
-                        .get(t)
-                        .unwrap_or(&self.token2str[&self.str2token["[UNK]"]])
-                        .to_owned()
-                })
-                .collect::<Vec<_>>()
-                .concat(),
-        )
+        let start = std::time::Instant::now();
+        let normalized = v
+            .iter()
+            .map(|&t| {
+                self.token2str
+                    .get(t as usize)
+                    .map_or("[UNK]", |v| v)
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        println!(
+            "decoded normalized text in {:?}",
+            std::time::Instant::now() - start
+        );
+        Tokenizer::denormalize(&normalized)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, time::Instant};
+
     use super::*;
     const NORM_STRINGS: &[(&str, &str)] = &[
         ("ABC\nabc", "▁ABC\n▁abc"),
@@ -267,40 +378,23 @@ mod tests {
         }
     }
 
+    const STRINGS: &[&str] = &[
+        "кто-то где-то что-то с чем-то смешивает- смешивает да ка-а-ак смешает",
+        "пробелы    пробелы[UNK]---=== (((Hello, World!))) ===---\n\
+        1000000 / 1000 = 1000",
+        "Кружка-термос на 0.5л (вмещает 50/64 см³, вес 516г).\
+        Скорость составила 90км/ч, а длина кабеля — 15мм. 
+        В коробке 24шт. товара по цене 150руб/шт.\
+        Это произошло в 90-х годах XX века. На 2-м этаже открылся новый офис. 
+        В 10-12 часах езды от города находится заповедник. 
+        Выпускники 11-го класса сдали экзамены на 95-100 баллов\
+        Модель процессора: Intel Core i7-12700K или Эльбрус-8С.",
+    ];
+
     #[test]
     fn codepoint2token() {
-        let strings = [
-            //П. Никулин (без названия?), W. Blake (Auguries of Innocence), В. Пелевин (Омон Ра)
-            "небо с утра дрожит\n\
-            цвета распадаются на базовые и на те что недоступны глазу\n\
-            в парке снова пахнет слезоточивым газом\n\
-            кислотой\n\
-            порохом\n\
-            известью\n\
-            выбешивает дветысячидевятнадцатый и скоро совсем выбесит<...>\
-            \n\nTo see a world in a grain of sand\n\
-            And a heaven in a wild flower,\n\
-            Hold infinity in the palm of your hand\n\
-            And eternity in an hour",
-            "\n\nМы летели со скоростью двух с половиной километров в секунду, и инерционная часть полета заняла около трех суток, \
-            но у меня осталось чувство, что я летел не меньше недели. Наверно, потому, что солнце несколько раз в сутки проходило \
-            перед глазками, и каждый раз я любовался восходом и закатом небывалой красоты.\nОт огромной ракеты теперь оставался \
-            только лунный модуль, состоявший из ступени коррекции и торможения, где сидел Дима Матюшевич, и спускаемого аппарата, \
-            то есть попросту лунохода на платформе. Чтоб не тратить лишнее горючее, обтекатель отстрелился еще перед разгоном с \
-            орбиты спутника, и за бортом лунохода теперь был открытый космос.",
-            "кто-то где-то что-то с чем-то смешивает- смешивает да ка-а-ак смешает",
-            "пробелы    пробелы[UNK]---=== (((Hello, World!))) ===---\n\
-            1000000 / 1000 = 1000",
-            "Кружка-термос на 0.5л (вмещает 50/64 см³, вес 516г).\
-            Скорость составила 90км/ч, а длина кабеля — 15мм. 
-            В коробке 24шт. товара по цене 150руб/шт.\
-            Это произошло в 90-х годах XX века. На 2-м этаже открылся новый офис. 
-            В 10-12 часах езды от города находится заповедник. 
-            Выпускники 11-го класса сдали экзамены на 95-100 баллов\
-            Модель процессора: Intel Core i7-12700K или Эльбрус-8С.",
-        ];
-        let tok = Tokenizer::train(&strings.concat(), None);
-        for &s in strings.iter() {
+        let tok = Tokenizer::train(&STRINGS.concat(), None);
+        for &s in STRINGS.iter() {
             let enc = tok.encode(s);
             let dec = tok.decode(&enc);
             assert_eq!(s, dec);
@@ -309,40 +403,36 @@ mod tests {
 
     #[test]
     fn codepoint_bpe() {
-        let strings = [
-            "пробелы    пробелы[UNK]небо с утра дрожит\n\
-            цвета распадаются на базовые и на те что недоступны глазу\n\
-            в парке снова пахнет слезоточивым газом\n\
-            кислотой\n\
-            порохом\n\
-            известью\n\
-            выбешивает дветысячидевятнадцатый и скоро совсем выбесит...\
-            \n\nTo see a world in a grain of sand\n\
-            And a heaven in a wild flower,\n\
-            Hold infinity in the palm of your hand\n\
-            And eternity in an hour.",
-            "\n\nМы летели со скоростью двух с половиной километров в секунду, и инерционная часть полета заняла около трех суток, \
-            но у меня осталось чувство, что я летел не меньше недели. Наверно, потому, что солнце несколько раз в сутки проходило \
-            перед глазками, и каждый раз я любовался восходом и закатом небывалой красоты.\nОт огромной ракеты теперь оставался \
-            только лунный модуль, состоявший из ступени коррекции и торможения, где сидел Дима Матюшевич, и спускаемого аппарата, \
-            то есть попросту лунохода на платформе. Чтоб не тратить лишнее горючее, обтекатель отстрелился еще перед разгоном с \
-            орбиты спутника, и за бортом лунохода теперь был открытый космос.",
-            "кто-то где-то что-то с чем-то смешивает- смешивает да ка-а-ак смешает",
-            "---=== (((Hello, World!))) ===---\n\
-            1000000 / 1000 = 1000",
-            "Кружка-термос на 0.5л (вмещает 50/64 см³, вес 516г).\
-            Скорость составила 90км/ч, а длина кабеля — 15мм. 
-            В коробке 24шт. товара по цене 150руб/шт.\
-            Это произошло в 90-х годах XX века. На 2-м этаже открылся новый офис. 
-            В 10-12 часах езды от города находится заповедник. 
-            Выпускники 11-го класса сдали экзамены на 95-100 баллов\
-            Модель процессора: Intel Core i7-12700K или Эльбрус-8С.",
-        ];
-        let tok = Tokenizer::train(&strings.concat(), Some(512));
-        for &s in strings.iter() {
+        let tok = Tokenizer::train(&STRINGS.concat(), Some(512));
+        for &s in STRINGS.iter() {
             let enc = tok.encode(s);
             let dec = tok.decode(&enc);
             assert_eq!(s, dec);
+            println!(
+                "original byte len: {}, encoded byte len: {}",
+                s.len(),
+                enc.len() * 2
+            )
         }
+    }
+
+    #[test]
+    fn shakespeare() {
+        let s = fs::read_to_string("shakespeare.txt").unwrap();
+        let start = Instant::now();
+        let tok = Tokenizer::train(&s, Some(512));
+        println!("trained in {:?}", Instant::now() - start);
+        let start = Instant::now();
+        let enc = tok.encode(&s);
+        println!("encoded in {:?}", Instant::now() - start);
+        let start = Instant::now();
+        let dec = tok.decode(&enc);
+        println!("decoded in {:?}", Instant::now() - start);
+        assert_eq!(s, dec);
+        println!(
+            "original byte len: {}, encoded byte len: {}",
+            s.len(),
+            enc.len() * 2
+        )
     }
 }
