@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
-use fancy_regex::{Captures, Regex};
+use fancy_regex::Regex;
 use priority_queue::PriorityQueue;
+
+use crate::GroupType::Digits;
 
 pub type Token = u16;
 
@@ -16,7 +18,6 @@ pub struct Tokenizer {
 enum GroupType {
     Letters,
     Digits,
-    Spaces,
     Other,
 }
 
@@ -69,12 +70,9 @@ impl Tokenizer {
             longest_str: alphabet.iter().fold(0, |l, s| std::cmp::max(l, s.len())),
             token2str: alphabet,
         };
-        println!("tok core done");
 
         if let Some(vocab_size) = vocab_size {
-            let start = std::time::Instant::now();
             let norm = Tokenizer::normalize(s);
-            println!("normalized in {:?}", std::time::Instant::now() - start);
             let mut chunks: Vec<Vec<ArenaNode>> = Tokenizer::chunks(&norm)
                 .iter()
                 .map(|str_chunk| {
@@ -202,66 +200,126 @@ impl Tokenizer {
     }
 
     fn normalize(s: &str) -> String {
-        let re = Regex::new(
-            r"(?P<L>\p{L}+(?:-\p{L}+)*)|(?P<D>\p{N}+)|(?P<S>[▁ ]+)|(?P<O>[^\p{L}\p{N} ▁]+)",
-        )
-        .unwrap();
+        // let re = Regex::new(
+        //     r"(?P<L>\p{L}+(?:-\p{L}+)*)|(?P<D>\p{N}+)|(?P<S>[▁ ]+)|(?P<O>[^\p{L}\p{N} ▁]+)",
+        // )
+        // .unwrap();
 
+        let mut insertion_counter = 0;
         let mut prev_type = GroupType::Other;
-
-        re.replace_all(s, |caps: &Captures| {
-            if let Some(m) = caps.name("L") {
-                let res = if prev_type == GroupType::Other || prev_type == GroupType::Digits {
-                    format!("▁{}", m.as_str())
-                } else {
-                    m.as_str().to_string()
-                };
-                prev_type = GroupType::Letters;
-                res
-            } else if let Some(m) = caps.name("D") {
-                let res = if prev_type == GroupType::Other || prev_type == GroupType::Letters {
-                    format!("▁{}", m.as_str())
-                } else {
-                    m.as_str().to_string()
-                };
-                prev_type = GroupType::Digits;
-                res
-            } else if let Some(m) = caps.name("O") {
-                prev_type = GroupType::Other;
-                m.as_str().to_string()
-            } else if let Some(m) = caps.name("S") {
-                let mut res = m.as_str().to_string();
-                let end_idx = caps.get(0).unwrap().end();
-                let remaining = &s[end_idx..];
-
-                let next_is_letter = remaining.chars().next().is_some_and(|c| c.is_alphabetic());
-                let next_is_digit = remaining.chars().next().is_some_and(|c| c.is_numeric());
-
-                if !res.ends_with('\u{2581}') && (next_is_digit || next_is_letter) {
-                    if (prev_type == GroupType::Letters && next_is_letter)
-                        || (prev_type == GroupType::Digits && next_is_digit)
-                    {
-                        res.pop();
+        let mut iter = s.chars().peekable();
+        while let Some(c) = iter.next() {
+            let letter = c.is_alphabetic()
+                || (c == '-' && {
+                    if let Some(next_c) = iter.peek() {
+                        next_c.is_alphabetic() && (prev_type == GroupType::Letters)
+                    } else {
+                        false
                     }
-                    res.push('▁');
-                }
-                prev_type = GroupType::Spaces;
-                res
-            } else {
-                "".to_string()
+                });
+            let digit = c.is_numeric();
+            if (letter && prev_type != GroupType::Letters)
+                || (digit && prev_type != GroupType::Digits)
+            {
+                insertion_counter += 1;
             }
-        })
-        .into_owned()
+            if letter {
+                prev_type = GroupType::Letters;
+            } else if digit {
+                prev_type = GroupType::Digits;
+            } else if c == ' ' || c == '▁' {
+            } else {
+                prev_type = GroupType::Other;
+            }
+        }
+
+        let mut result = String::with_capacity(s.len() + insertion_counter);
+
+        prev_type = GroupType::Other;
+        let mut prev_char = None;
+        let mut iter = s.chars().peekable();
+        while let Some(c) = iter.next() {
+            let letter = c.is_alphabetic()
+                || (c == '-' && {
+                    if let Some(next_c) = iter.peek() {
+                        next_c.is_alphabetic() && (prev_type == GroupType::Letters)
+                    } else {
+                        false
+                    }
+                });
+            let digit = c.is_numeric();
+            if ((letter && prev_type != GroupType::Letters)
+                || (digit && prev_type != GroupType::Digits))
+                && (prev_char != Some('▁'))
+            {
+                result.push('▁');
+            }
+            if c == ' ' || c == '▁' {
+                if let Some(next_c) = iter.peek() {
+                    let letter_next = next_c.is_alphabetic();
+                    let digit_next = next_c.is_numeric();
+                    if (letter_next && prev_type == GroupType::Letters)
+                        || (digit_next && prev_type == Digits)
+                    {
+                        result.push('▁');
+                    } else {
+                        result.push(c);
+                    }
+                }
+            } else {
+                if letter {
+                    prev_type = GroupType::Letters;
+                } else if digit {
+                    prev_type = GroupType::Digits;
+                } else {
+                    prev_type = GroupType::Other;
+                }
+                result.push(c);
+            }
+            prev_char = Some(c);
+        }
+        result
     }
 
     fn denormalize(s: &str) -> String {
-        let s = Regex::new(r"(\p{L} *)▁(?=\p{L})|(\p{N} *)▁(?=\p{N})")
-            .unwrap()
-            .replace_all(s, "$1$2 ");
-        Regex::new(r"(^|[^\p{L}] *)▁(?=\p{L})|(^|[^\p{N}] *)▁(?=\p{N})")
-            .unwrap()
-            .replace_all(&s, "$1$2")
-            .to_string()
+        // regex equivalent:
+        // Regex::new(r"(^|[^\p{L}] *)▁(?=\p{L})|(^|[^\p{N}] *)▁(?=\p{N})")
+        //     .unwrap()
+        //     .replace_all(&Regex::new(r"(\p{L} *)▁(?=\p{L})|(\p{N} *)▁(?=\p{N})")
+        //     .unwrap()
+        //     .replace_all(s, "$1$2 "), "$1$2")
+        let mut result = String::with_capacity(s.len());
+        let mut prev_type = GroupType::Other;
+        let mut pref_flag = false;
+        for c in s.chars() {
+            if c == '▁' {
+                pref_flag = true;
+            } else {
+                let mut replace_mode: bool = false;
+                if c.is_alphabetic() {
+                    if prev_type != GroupType::Letters {
+                        prev_type = GroupType::Letters;
+                    } else {
+                        replace_mode = true;
+                    }
+                } else if c.is_numeric() {
+                    if prev_type != GroupType::Digits {
+                        prev_type = GroupType::Digits;
+                    } else {
+                        replace_mode = true;
+                    }
+                } else if c != ' ' && prev_type != GroupType::Other {
+                    prev_type = GroupType::Other;
+                }
+
+                if pref_flag && replace_mode {
+                    result.push(' ');
+                }
+                pref_flag = false;
+                result.push(c);
+            }
+        }
+        result
     }
 
     fn chunks(s: &str) -> Vec<&str> {
@@ -419,6 +477,7 @@ mod tests {
     #[test]
     fn shakespeare() {
         let s = fs::read_to_string("shakespeare.txt").unwrap();
+        let s0 = Instant::now();
         let start = Instant::now();
         let tok = Tokenizer::train(&s, Some(512));
         println!("trained in {:?}", Instant::now() - start);
@@ -429,6 +488,7 @@ mod tests {
         let dec = tok.decode(&enc);
         println!("decoded in {:?}", Instant::now() - start);
         assert_eq!(s, dec);
+        println!("total time {:?}", Instant::now() - s0);
         println!(
             "original byte len: {}, encoded byte len: {}",
             s.len(),
