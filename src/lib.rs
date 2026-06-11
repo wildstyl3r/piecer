@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 mod pair_ordering;
 mod prepare;
 
+use aho_corasick::AhoCorasick;
 use priority_queue::PriorityQueue;
 
 use crate::{
@@ -15,6 +16,7 @@ pub type Token = u16;
 pub struct Tokenizer {
     str2token: HashMap<String, Token>,
     token2str: Vec<String>,
+    str2token_ac: AhoCorasick,
     longest_str: usize,
 }
 
@@ -79,6 +81,11 @@ impl Tokenizer {
                 .map(|(i, t)| (t.to_owned(), i as Token))
                 .collect(),
             longest_str: alphabet.iter().fold(0, |l, s| std::cmp::max(l, s.len())),
+            str2token_ac: AhoCorasick::builder()
+                .kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA))
+                .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+                .build(&alphabet)
+                .unwrap(),
             token2str: alphabet,
         };
         let mut protostack: Vec<_> = (0..tokenizer.token2str.len())
@@ -208,29 +215,20 @@ impl Tokenizer {
                 tokenizer.token2str.push(s.clone());
                 tokenizer.str2token.insert(s, i as Token);
             }
+            tokenizer.str2token_ac = AhoCorasick::builder()
+                .kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA))
+                .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+                .build(&tokenizer.token2str)
+                .unwrap();
         }
         tokenizer
     }
 
-    fn encode_normalized(&self, mut s: &str) -> Vec<Token> {
-        let mut res = Vec::new();
-        while !s.is_empty() {
-            res.push(
-                *(1..self.longest_str)
-                    .rev()
-                    .find_map(|l| {
-                        if s.is_char_boundary(l) {
-                            self.str2token.get(&s[..l]).inspect(|_| {
-                                s = &s[l..];
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(&self.str2token["[UNK]"]),
-            );
-        }
-        res
+    fn encode_normalized(&self, s: &str) -> Vec<Token> {
+        self.str2token_ac
+            .find_iter(s)
+            .map(|mat| mat.pattern().as_u32() as Token)
+            .collect()
     }
 
     pub fn encode(&self, s: &str) -> Vec<Token> {

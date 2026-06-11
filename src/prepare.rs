@@ -14,37 +14,9 @@ pub(crate) fn normalize(s: &str) -> String {
     //     r"(?P<L>\p{L}+(?:-\p{L}+)*)|(?P<D>\p{N}+)|(?P<S>[▁ ]+)|(?P<O>[^\p{L}\p{N} ▁]+)",
     // )
     // .unwrap();
+    let mut result = String::with_capacity(s.len());
 
-    let mut insertion_counter = 0;
     let mut prev_type = GroupType::Other;
-    let mut iter = s.chars().peekable();
-    while let Some(c) = iter.next() {
-        let letter = c.is_alphabetic()
-            || (c == '-' && {
-                if let Some(next_c) = iter.peek() {
-                    next_c.is_alphabetic() && (prev_type == GroupType::Letters)
-                } else {
-                    false
-                }
-            });
-        let digit = c.is_numeric();
-        if (letter && prev_type != GroupType::Letters) || (digit && prev_type != GroupType::Digits)
-        {
-            insertion_counter += 1;
-        }
-        if letter {
-            prev_type = GroupType::Letters;
-        } else if digit {
-            prev_type = GroupType::Digits;
-        } else if c == ' ' || c == '▁' {
-        } else {
-            prev_type = GroupType::Other;
-        }
-    }
-
-    let mut result = String::with_capacity(s.len() + insertion_counter);
-
-    prev_type = GroupType::Other;
     let mut prev_char = None;
     let mut iter = s.chars().peekable();
     while let Some(c) = iter.next() {
