@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::sync::OnceLock;
 
-use fancy_regex::Regex;
 use priority_queue::PriorityQueue;
+use regex::Regex;
 
 use crate::GroupType::Digits;
 
@@ -73,8 +74,8 @@ impl Tokenizer {
 
         if let Some(vocab_size) = vocab_size {
             let norm = Tokenizer::normalize(s);
+            let start = std::time::Instant::now();
             let mut chunks: Vec<Vec<ArenaNode>> = Tokenizer::chunks(&norm)
-                .iter()
                 .map(|str_chunk| {
                     let mut chunk: Vec<ArenaNode> = tokenizer
                         .encode_normalized(str_chunk)
@@ -90,27 +91,23 @@ impl Tokenizer {
                     chunk
                 })
                 .collect();
-            println!("chunking done");
+            println!("chunking done in {:?}", std::time::Instant::now() - start);
 
+            let start = std::time::Instant::now();
             let mut bootstrap_counts = HashMap::new();
             for (chunk, chunk_v) in chunks.iter().enumerate() {
-                for (i, pair_first) in chunk_v[..chunk_v.len() - 1]
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, a)| a.next.is_some())
-                {
-                    let current_pair = (
-                        pair_first.value,
-                        chunk_v[*pair_first.next.as_ref().unwrap()].value,
-                    );
+                for (i, p) in chunk_v.windows(2).enumerate() {
                     bootstrap_counts
-                        .entry(current_pair)
+                        .entry((p[0].value, p[1].value))
                         .or_insert(HashSet::new())
                         .insert((chunk, i));
                 }
             }
-            println!("count construction done");
-            let mut pq_counts = PriorityQueue::new();
+            println!(
+                "count construction done in {:?}",
+                std::time::Instant::now() - start
+            );
+            let mut pq_counts = PriorityQueue::with_capacity(bootstrap_counts.len());
             for (k, v) in bootstrap_counts {
                 pq_counts.push(k, OrdHashSet(v));
             }
@@ -322,12 +319,12 @@ impl Tokenizer {
         result
     }
 
-    fn chunks(s: &str) -> Vec<&str> {
-        let pattern =
-            r"'s|'t|'re|'ve|'m|'ll|'d|▁?\p{L}+(?:-\p{L}+)*|▁?\p{N}{1,3}|[^\s\p{L}\p{N}▁]+|\s+";
-        let re = Regex::new(pattern).unwrap();
+    fn chunks(s: &str) -> impl Iterator<Item = &str> {
+        let pattern = r"'(?:[stmd]|re|ve|ll)|▁(\p{L}+(?:[\p{L}-]*\p{L})?|\p{N}{1,3})|\p{N}{1,3}|[^\s\p{L}\p{N}▁]+|\s+";
+        static RE: OnceLock<Regex> = OnceLock::new();
+        let re = RE.get_or_init(|| Regex::new(pattern).unwrap());
 
-        re.find_iter(s).map(|mat| mat.unwrap().as_str()).collect()
+        re.find_iter(s).map(|mat| mat.as_str())
     }
 
     fn encode_normalized(&self, mut s: &str) -> Vec<Token> {
@@ -441,13 +438,33 @@ mod tests {
         "пробелы    пробелы[UNK]---=== (((Hello, World!))) ===---\n\
         1000000 / 1000 = 1000",
         "Кружка-термос на 0.5л (вмещает 50/64 см³, вес 516г).\
-        Скорость составила 90км/ч, а длина кабеля — 15мм. 
-        В коробке 24шт. товара по цене 150руб/шт.\
-        Это произошло в 90-х годах XX века. На 2-м этаже открылся новый офис. 
-        В 10-12 часах езды от города находится заповедник. 
-        Выпускники 11-го класса сдали экзамены на 95-100 баллов\
-        Модель процессора: Intel Core i7-12700K или Эльбрус-8С.",
+        Скорость составила 90км/ч, а длина кабеля — 15мм.",
+        "В коробке 24шт. товара по цене 150руб/шт.\
+        Это произошло в 90-х годах XX века. На 2-м этаже открылся новый офис.
+        В 10-12 часах езды от города находится заповедник.
+        Выпускники 11-го класса сдали экзамены на 95-100 баллов",
+        "Модель процессора: Intel Core i7-12700K или Эльбрус-8С.",
     ];
+
+    #[test]
+    fn chunking() {
+        let pattern =
+            r"'s|'t|'re|'ve|'m|'ll|'d|▁?\p{L}+(?:-\p{L}+)*|▁?\p{N}{1,3}|[^\p{L}\p{N}▁\s]+|\s+";
+        let re = Regex::new(pattern).unwrap();
+
+        for &s in STRINGS.iter() {
+            let ns = Tokenizer::normalize(s);
+            let chunks = Tokenizer::chunks(&ns);
+            let regex_chunks = re.find_iter(&ns).map(|mat| mat.as_str());
+            assert!(chunks.eq(regex_chunks));
+        }
+
+        let ss = fs::read_to_string("shakespeare.txt").unwrap();
+        let ns = Tokenizer::normalize(&ss);
+        let chunks = Tokenizer::chunks(&ns);
+        let regex_chunks = re.find_iter(&ns).map(|mat| mat.as_str());
+        assert!(chunks.eq(regex_chunks));
+    }
 
     #[test]
     fn codepoint2token() {
@@ -479,7 +496,7 @@ mod tests {
         let s = fs::read_to_string("shakespeare.txt").unwrap();
         let s0 = Instant::now();
         let start = Instant::now();
-        let tok = Tokenizer::train(&s, Some(512));
+        let tok = Tokenizer::train(&s, Some(2048));
         println!("trained in {:?}", Instant::now() - start);
         let start = Instant::now();
         let enc = tok.encode(&s);
