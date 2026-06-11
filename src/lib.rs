@@ -29,23 +29,26 @@ struct ArenaNode {
 }
 
 #[derive(Debug, Eq)]
-pub struct OrdHashSet<T: Hash>(pub HashSet<T>);
+pub struct StableOrdHashSet<T: Hash>(pub HashSet<T>, pub (Token, Token));
 
-impl<T: Hash> PartialEq for OrdHashSet<T> {
+impl<T: Hash> PartialEq for StableOrdHashSet<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.0.len() == other.0.len()
+        (self.0.len() == other.0.len()) && (self.1 == other.1)
     }
 }
 
-impl<T: Hash + Eq> PartialOrd for OrdHashSet<T> {
+impl<T: Hash + Eq> PartialOrd for StableOrdHashSet<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T: Hash + Eq> Ord for OrdHashSet<T> {
+impl<T: Hash + Eq> Ord for StableOrdHashSet<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.len().cmp(&other.0.len())
+        self.0
+            .len()
+            .cmp(&other.0.len())
+            .then_with(|| self.1.cmp(&other.1))
     }
 }
 
@@ -109,7 +112,7 @@ impl Tokenizer {
             );
             let mut pq_counts = PriorityQueue::with_capacity(bootstrap_counts.len());
             for (k, v) in bootstrap_counts {
-                pq_counts.push(k, OrdHashSet(v));
+                pq_counts.push(k, StableOrdHashSet(v, k));
             }
             while tokenizer.token2str.len() < vocab_size {
                 match pq_counts.peek() {
@@ -185,7 +188,7 @@ impl Tokenizer {
                         }
 
                         for (key, insert) in addons {
-                            pq_counts.push(key, OrdHashSet(insert));
+                            pq_counts.push(key, StableOrdHashSet(insert, key));
                         }
                     }
                     None => break,
@@ -496,7 +499,7 @@ mod tests {
         let s = fs::read_to_string("shakespeare.txt").unwrap();
         let s0 = Instant::now();
         let start = Instant::now();
-        let tok = Tokenizer::train(&s, Some(2048));
+        let tok = Tokenizer::train(&s, Some(10000));
         println!("trained in {:?}", Instant::now() - start);
         let start = Instant::now();
         let enc = tok.encode(&s);
