@@ -1,11 +1,14 @@
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
-use std::sync::OnceLock;
+
+mod pair_ordering;
+mod prepare;
 
 use priority_queue::PriorityQueue;
-use regex::Regex;
 
-use crate::GroupType::Digits;
+use crate::{
+    pair_ordering::StableOrdHashSet,
+    prepare::{chunks, denormalize, normalize},
+};
 
 pub type Token = u16;
 
@@ -15,41 +18,10 @@ pub struct Tokenizer {
     longest_str: usize,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum GroupType {
-    Letters,
-    Digits,
-    Other,
-}
-
 struct ArenaNode {
     value: Token,
     prev: Option<usize>,
     next: Option<usize>,
-}
-
-#[derive(Debug, Eq)]
-pub struct StableOrdHashSet<T: Hash>(pub HashSet<T>, pub (Token, Token));
-
-impl<T: Hash> PartialEq for StableOrdHashSet<T> {
-    fn eq(&self, other: &Self) -> bool {
-        (self.0.len() == other.0.len()) && (self.1 == other.1)
-    }
-}
-
-impl<T: Hash + Eq> PartialOrd for StableOrdHashSet<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T: Hash + Eq> Ord for StableOrdHashSet<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .len()
-            .cmp(&other.0.len())
-            .then_with(|| self.1.cmp(&other.1))
-    }
 }
 
 impl Tokenizer {
@@ -76,9 +48,9 @@ impl Tokenizer {
         };
 
         if let Some(vocab_size) = vocab_size {
-            let norm = Tokenizer::normalize(s);
+            let norm = normalize(s);
             let start = std::time::Instant::now();
-            let mut chunks: Vec<Vec<ArenaNode>> = Tokenizer::chunks(&norm)
+            let mut chunks: Vec<Vec<ArenaNode>> = chunks(&norm)
                 .map(|str_chunk| {
                     let mut chunk: Vec<ArenaNode> = tokenizer
                         .encode_normalized(str_chunk)
@@ -199,137 +171,6 @@ impl Tokenizer {
         tokenizer
     }
 
-    fn normalize(s: &str) -> String {
-        // let re = Regex::new(
-        //     r"(?P<L>\p{L}+(?:-\p{L}+)*)|(?P<D>\p{N}+)|(?P<S>[▁ ]+)|(?P<O>[^\p{L}\p{N} ▁]+)",
-        // )
-        // .unwrap();
-
-        let mut insertion_counter = 0;
-        let mut prev_type = GroupType::Other;
-        let mut iter = s.chars().peekable();
-        while let Some(c) = iter.next() {
-            let letter = c.is_alphabetic()
-                || (c == '-' && {
-                    if let Some(next_c) = iter.peek() {
-                        next_c.is_alphabetic() && (prev_type == GroupType::Letters)
-                    } else {
-                        false
-                    }
-                });
-            let digit = c.is_numeric();
-            if (letter && prev_type != GroupType::Letters)
-                || (digit && prev_type != GroupType::Digits)
-            {
-                insertion_counter += 1;
-            }
-            if letter {
-                prev_type = GroupType::Letters;
-            } else if digit {
-                prev_type = GroupType::Digits;
-            } else if c == ' ' || c == '▁' {
-            } else {
-                prev_type = GroupType::Other;
-            }
-        }
-
-        let mut result = String::with_capacity(s.len() + insertion_counter);
-
-        prev_type = GroupType::Other;
-        let mut prev_char = None;
-        let mut iter = s.chars().peekable();
-        while let Some(c) = iter.next() {
-            let letter = c.is_alphabetic()
-                || (c == '-' && {
-                    if let Some(next_c) = iter.peek() {
-                        next_c.is_alphabetic() && (prev_type == GroupType::Letters)
-                    } else {
-                        false
-                    }
-                });
-            let digit = c.is_numeric();
-            if ((letter && prev_type != GroupType::Letters)
-                || (digit && prev_type != GroupType::Digits))
-                && (prev_char != Some('▁'))
-            {
-                result.push('▁');
-            }
-            if c == ' ' || c == '▁' {
-                if let Some(next_c) = iter.peek() {
-                    let letter_next = next_c.is_alphabetic();
-                    let digit_next = next_c.is_numeric();
-                    if (letter_next && prev_type == GroupType::Letters)
-                        || (digit_next && prev_type == Digits)
-                    {
-                        result.push('▁');
-                    } else {
-                        result.push(c);
-                    }
-                }
-            } else {
-                if letter {
-                    prev_type = GroupType::Letters;
-                } else if digit {
-                    prev_type = GroupType::Digits;
-                } else {
-                    prev_type = GroupType::Other;
-                }
-                result.push(c);
-            }
-            prev_char = Some(c);
-        }
-        result
-    }
-
-    fn denormalize(s: &str) -> String {
-        // regex equivalent:
-        // Regex::new(r"(^|[^\p{L}] *)▁(?=\p{L})|(^|[^\p{N}] *)▁(?=\p{N})")
-        //     .unwrap()
-        //     .replace_all(&Regex::new(r"(\p{L} *)▁(?=\p{L})|(\p{N} *)▁(?=\p{N})")
-        //     .unwrap()
-        //     .replace_all(s, "$1$2 "), "$1$2")
-        let mut result = String::with_capacity(s.len());
-        let mut prev_type = GroupType::Other;
-        let mut pref_flag = false;
-        for c in s.chars() {
-            if c == '▁' {
-                pref_flag = true;
-            } else {
-                let mut replace_mode: bool = false;
-                if c.is_alphabetic() {
-                    if prev_type != GroupType::Letters {
-                        prev_type = GroupType::Letters;
-                    } else {
-                        replace_mode = true;
-                    }
-                } else if c.is_numeric() {
-                    if prev_type != GroupType::Digits {
-                        prev_type = GroupType::Digits;
-                    } else {
-                        replace_mode = true;
-                    }
-                } else if c != ' ' && prev_type != GroupType::Other {
-                    prev_type = GroupType::Other;
-                }
-
-                if pref_flag && replace_mode {
-                    result.push(' ');
-                }
-                pref_flag = false;
-                result.push(c);
-            }
-        }
-        result
-    }
-
-    fn chunks(s: &str) -> impl Iterator<Item = &str> {
-        let pattern = r"'(?:[stmd]|re|ve|ll)|▁(\p{L}+(?:[\p{L}-]*\p{L})?|\p{N}{1,3})|\p{N}{1,3}|[^\s\p{L}\p{N}▁]+|\s+";
-        static RE: OnceLock<Regex> = OnceLock::new();
-        let re = RE.get_or_init(|| Regex::new(pattern).unwrap());
-
-        re.find_iter(s).map(|mat| mat.as_str())
-    }
-
     fn encode_normalized(&self, mut s: &str) -> Vec<Token> {
         let mut res = Vec::new();
         while !s.is_empty() {
@@ -352,7 +193,7 @@ impl Tokenizer {
     }
 
     pub fn encode(&self, s: &str) -> Vec<Token> {
-        self.encode_normalized(&Tokenizer::normalize(s))
+        self.encode_normalized(&normalize(s))
     }
 
     pub fn decode(&self, v: &[Token]) -> String {
@@ -371,7 +212,7 @@ impl Tokenizer {
             "decoded normalized text in {:?}",
             std::time::Instant::now() - start
         );
-        Tokenizer::denormalize(&normalized)
+        denormalize(&normalized)
     }
 }
 
@@ -404,7 +245,7 @@ mod tests {
     #[test]
     fn norm() {
         for (source, target) in NORM_STRINGS {
-            assert_eq!(Tokenizer::normalize(source), *target)
+            assert_eq!(normalize(source), *target)
         }
     }
 
@@ -418,21 +259,21 @@ mod tests {
             ("▁a\n ▁b", "▁a\n ▁b"),
             ("▁a\n▁в▁парке", "▁a\n▁в▁парке"),
         ] {
-            assert_eq!(Tokenizer::normalize(source), *target)
+            assert_eq!(normalize(source), *target)
         }
     }
 
     #[test]
     fn denorm() {
         for (target, source) in NORM_STRINGS {
-            assert_eq!(Tokenizer::denormalize(source), *target)
+            assert_eq!(denormalize(source), *target)
         }
     }
 
     #[test]
     fn twice_denorm() {
         for (source, target) in [("a a", "a a"), ("a  a", "a  a"), ("def  123", "def  123")] {
-            assert_eq!(Tokenizer::denormalize(source), *target)
+            assert_eq!(denormalize(source), *target)
         }
     }
 
@@ -453,18 +294,18 @@ mod tests {
     fn chunking() {
         let pattern =
             r"'s|'t|'re|'ve|'m|'ll|'d|▁?\p{L}+(?:-\p{L}+)*|▁?\p{N}{1,3}|[^\p{L}\p{N}▁\s]+|\s+";
-        let re = Regex::new(pattern).unwrap();
+        let re = regex::Regex::new(pattern).unwrap();
 
         for &s in STRINGS.iter() {
-            let ns = Tokenizer::normalize(s);
-            let chunks = Tokenizer::chunks(&ns);
+            let ns = normalize(s);
+            let chunks = chunks(&ns);
             let regex_chunks = re.find_iter(&ns).map(|mat| mat.as_str());
             assert!(chunks.eq(regex_chunks));
         }
 
         let ss = fs::read_to_string("shakespeare.txt").unwrap();
-        let ns = Tokenizer::normalize(&ss);
-        let chunks = Tokenizer::chunks(&ns);
+        let ns = normalize(&ss);
+        let chunks = chunks(&ns);
         let regex_chunks = re.find_iter(&ns).map(|mat| mat.as_str());
         assert!(chunks.eq(regex_chunks));
     }
