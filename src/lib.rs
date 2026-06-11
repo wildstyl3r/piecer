@@ -24,6 +24,41 @@ struct ArenaNode {
     next: Option<usize>,
 }
 
+enum ProtoToken {
+    Pair(usize, usize),
+    Token(Token),
+}
+
+impl ProtoToken {
+    fn pieces<'b>(
+        &self,
+        as_token: Token,
+        tokens: &'b [String],
+        protostack: &[ProtoToken],
+    ) -> Vec<&'b str> {
+        match self {
+            ProtoToken::Pair(a, b) => {
+                let mut result: Vec<&str> = Vec::new();
+                let mut stack = Vec::new();
+                stack.push(b);
+                stack.push(a);
+                while !stack.is_empty() {
+                    let current = &protostack[*stack.pop().unwrap()];
+                    match current {
+                        ProtoToken::Pair(a, b) => {
+                            stack.push(b);
+                            stack.push(a);
+                        }
+                        ProtoToken::Token(t) => result.push(&tokens[*t as usize]),
+                    }
+                }
+                result
+            }
+            ProtoToken::Token(_) => vec![&tokens[as_token as usize]],
+        }
+    }
+}
+
 impl Tokenizer {
     pub fn train(s: &str, vocab_size: Option<usize>) -> Self {
         let mut alphabet = s
@@ -46,6 +81,9 @@ impl Tokenizer {
             longest_str: alphabet.iter().fold(0, |l, s| std::cmp::max(l, s.len())),
             token2str: alphabet,
         };
+        let mut protostack: Vec<_> = (0..tokenizer.token2str.len())
+            .map(|i| ProtoToken::Token(i as Token))
+            .collect();
 
         if let Some(vocab_size) = vocab_size {
             let norm = normalize(s);
@@ -86,16 +124,11 @@ impl Tokenizer {
             for (k, v) in bootstrap_counts {
                 pq_counts.push(k, StableOrdHashSet(v, k));
             }
-            while tokenizer.token2str.len() < vocab_size {
+            while protostack.len() < vocab_size {
                 match pq_counts.peek() {
                     Some(((pair1, pair2), positions_set)) => {
-                        let merge_str = tokenizer.token2str[*pair1 as usize].to_string()
-                            + &tokenizer.token2str[*pair2 as usize];
-                        let token = tokenizer.token2str.len() as Token;
-                        tokenizer.longest_str =
-                            std::cmp::max(tokenizer.longest_str, merge_str.len());
-                        tokenizer.token2str.push(merge_str.clone());
-                        tokenizer.str2token.insert(merge_str, token);
+                        let token = protostack.len() as Token;
+                        protostack.push(ProtoToken::Pair(*pair1 as usize, *pair2 as usize));
 
                         let mut positions: Vec<_> = positions_set.0.iter().collect();
                         positions.sort_by_key(|(_chunk, i)| i);
@@ -166,8 +199,16 @@ impl Tokenizer {
                     None => break,
                 }
             }
+            let base_len = tokenizer.token2str.len();
+            for (i, pt) in protostack.iter().enumerate().skip(base_len) {
+                let s = pt
+                    .pieces(i as Token, &tokenizer.token2str, &protostack)
+                    .concat();
+                tokenizer.longest_str = std::cmp::max(tokenizer.longest_str, s.len());
+                tokenizer.token2str.push(s.clone());
+                tokenizer.str2token.insert(s, i as Token);
+            }
         }
-
         tokenizer
     }
 
