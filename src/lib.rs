@@ -1,7 +1,9 @@
+use crate::utils::{ArenaNode, ProtoToken};
 use std::collections::{HashMap, HashSet};
 
 mod pair_ordering;
 mod prepare;
+mod utils;
 
 use aho_corasick::AhoCorasick;
 use priority_queue::PriorityQueue;
@@ -17,48 +19,6 @@ pub struct Tokenizer {
     str2token: HashMap<String, Token>,
     token2str: Vec<String>,
     str2token_ac: AhoCorasick,
-    longest_str: usize,
-}
-
-struct ArenaNode {
-    value: Token,
-    prev: Option<usize>,
-    next: Option<usize>,
-}
-
-enum ProtoToken {
-    Pair(usize, usize),
-    Token(Token),
-}
-
-impl ProtoToken {
-    fn pieces<'b>(
-        &self,
-        as_token: Token,
-        tokens: &'b [String],
-        protostack: &[ProtoToken],
-    ) -> Vec<&'b str> {
-        match self {
-            ProtoToken::Pair(a, b) => {
-                let mut result: Vec<&str> = Vec::new();
-                let mut stack = Vec::new();
-                stack.push(b);
-                stack.push(a);
-                while !stack.is_empty() {
-                    let current = &protostack[*stack.pop().unwrap()];
-                    match current {
-                        ProtoToken::Pair(a, b) => {
-                            stack.push(b);
-                            stack.push(a);
-                        }
-                        ProtoToken::Token(t) => result.push(&tokens[*t as usize]),
-                    }
-                }
-                result
-            }
-            ProtoToken::Token(_) => vec![&tokens[as_token as usize]],
-        }
-    }
 }
 
 impl Tokenizer {
@@ -80,7 +40,6 @@ impl Tokenizer {
                 .enumerate()
                 .map(|(i, t)| (t.to_owned(), i as Token))
                 .collect(),
-            longest_str: alphabet.iter().fold(0, |l, s| std::cmp::max(l, s.len())),
             str2token_ac: AhoCorasick::builder()
                 .kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA))
                 .match_kind(aho_corasick::MatchKind::LeftmostLongest)
@@ -211,7 +170,6 @@ impl Tokenizer {
                 let s = pt
                     .pieces(i as Token, &tokenizer.token2str, &protostack)
                     .concat();
-                tokenizer.longest_str = std::cmp::max(tokenizer.longest_str, s.len());
                 tokenizer.token2str.push(s.clone());
                 tokenizer.str2token.insert(s, i as Token);
             }
@@ -237,16 +195,10 @@ impl Tokenizer {
 
     pub fn decode(&self, v: &[Token]) -> String {
         let start = std::time::Instant::now();
-        let normalized = v
+        let normalized: String = v
             .iter()
-            .map(|&t| {
-                self.token2str
-                    .get(t as usize)
-                    .map_or("[UNK]", |v| v)
-                    .to_owned()
-            })
-            .collect::<Vec<_>>()
-            .concat();
+            .map(|&t| self.token2str.get(t as usize).map_or("[UNK]", |v| v))
+            .collect();
         println!(
             "decoded normalized text in {:?}",
             std::time::Instant::now() - start
