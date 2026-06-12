@@ -16,34 +16,59 @@ use crate::{
 pub type Token = u16;
 
 pub struct Tokenizer {
-    str2token: HashMap<String, Token>,
     token2str: Vec<String>,
     str2token_ac: AhoCorasick,
 }
 
 impl Tokenizer {
     pub fn train(s: &str, vocab_size: Option<usize>) -> Self {
-        let mut alphabet = s
-            .chars()
-            .fold(HashSet::<String>::new(), |mut acc, c| {
-                acc.insert(c.to_string());
-                acc
+        let mut alphabet: Vec<_> = (0..0x20u8)
+            .map(|b| {
+                if b == b'\t' || b == b'\n' || b == b'\r' {
+                    (b as char).to_string()
+                } else {
+                    format!("<{:02x}>", b)
+                }
             })
+            .chain((0x20u8..0x7f).map(|b| (b as char).to_string()))
+            .chain((0x7f..=0xffu8).map(|b| format!("<{:02x}>", b)))
+            .collect();
+        let mut extension = s
+            .chars()
+            .filter(|c| c.len_utf8() > 1)
+            .fold(
+                HashSet::<String>::from(
+                    ["▁", "[UNK]", "[PAD]", "[BOS]", "[EOS]"].map(|s| s.to_string()),
+                ),
+                |mut acc, c| {
+                    acc.insert(c.to_string());
+                    acc
+                },
+            )
             .into_iter()
             .collect::<Vec<_>>();
-        alphabet.extend(["▁", "[UNK]", "[PAD]", "[BOS]", "[EOS]"].map(|s| s.to_string()));
-        alphabet.sort();
+        extension.sort();
+        alphabet.extend(extension);
+
+        static BYTES: [u8; 256] = {
+            let mut arr = [0u8; 256];
+            let mut i = 0;
+            while i < 256 {
+                arr[i] = i as u8;
+                i += 1;
+            }
+            arr
+        };
 
         let mut tokenizer = Self {
-            str2token: alphabet
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (t.to_owned(), i as Token))
-                .collect(),
             str2token_ac: AhoCorasick::builder()
                 .kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA))
                 .match_kind(aho_corasick::MatchKind::LeftmostLongest)
-                .build(&alphabet)
+                .build(
+                    (0..256)
+                        .map(|i| &BYTES[i..=i])
+                        .chain(alphabet[256..].iter().map(|tok| tok.as_bytes())),
+                )
                 .unwrap(),
             token2str: alphabet,
         };
@@ -52,9 +77,7 @@ impl Tokenizer {
             .collect();
 
         if let Some(vocab_size) = vocab_size {
-            let norm = normalize(s);
-            let start = std::time::Instant::now();
-            let mut chunks: Vec<Vec<ArenaNode>> = chunks(&norm)
+            let mut chunks: Vec<Vec<ArenaNode>> = chunks(&normalize(s))
                 .map(|str_chunk| {
                     let mut chunk: Vec<ArenaNode> = tokenizer
                         .encode_normalized(str_chunk)
@@ -70,9 +93,6 @@ impl Tokenizer {
                     chunk
                 })
                 .collect();
-            println!("chunking done in {:?}", std::time::Instant::now() - start);
-
-            let start = std::time::Instant::now();
             let mut bootstrap_counts = HashMap::new();
             for (chunk, chunk_v) in chunks.iter().enumerate() {
                 for (i, p) in chunk_v.windows(2).enumerate() {
@@ -82,10 +102,6 @@ impl Tokenizer {
                         .push((chunk, i));
                 }
             }
-            println!(
-                "count construction done in {:?}",
-                std::time::Instant::now() - start
-            );
             let mut pq_counts = PriorityQueue::with_capacity(bootstrap_counts.len());
             for (k, v) in bootstrap_counts {
                 pq_counts.push(k, StableOrdHashSet(v.into_iter().collect(), k));
@@ -170,12 +186,15 @@ impl Tokenizer {
                     .pieces(i as Token, &tokenizer.token2str, &protostack)
                     .concat();
                 tokenizer.token2str.push(s.clone());
-                tokenizer.str2token.insert(s, i as Token);
             }
             tokenizer.str2token_ac = AhoCorasick::builder()
                 .kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA))
                 .match_kind(aho_corasick::MatchKind::LeftmostLongest)
-                .build(&tokenizer.token2str)
+                .build(
+                    (0..256)
+                        .map(|i| &BYTES[i..=i])
+                        .chain(tokenizer.token2str[256..].iter().map(|tok| tok.as_bytes())),
+                )
                 .unwrap();
         }
         tokenizer
@@ -192,17 +211,38 @@ impl Tokenizer {
         self.encode_normalized(&normalize(s))
     }
 
+    fn decode_normalized(&self, v: &[Token]) -> String {
+        let mut result = String::new();
+        let mut byte_buff = Vec::new();
+        for &t in v {
+            if t == 0x09 || t == 0x0a || t == 0x0d || (0x20..0x7f).contains(&t) || t > 0xff {
+                for &b in &byte_buff {
+                    result.push_str(self.token2str[b as usize].as_str());
+                }
+                byte_buff.clear();
+                result.push_str(self.token2str[t as usize].as_str())
+            } else {
+                if (0xc2..=0xf4).contains(&t) {
+                    for &b in &byte_buff {
+                        result.push_str(self.token2str[b as usize].as_str());
+                    }
+                    byte_buff.clear();
+                }
+                byte_buff.push(t as u8);
+                if let Ok(s) = str::from_utf8(&byte_buff) {
+                    result.push_str(s);
+                    byte_buff.clear();
+                }
+            }
+        }
+        for &b in &byte_buff {
+            result.push_str(self.token2str[b as usize].as_str());
+        }
+        result
+    }
+
     pub fn decode(&self, v: &[Token]) -> String {
-        let start = std::time::Instant::now();
-        let normalized: String = v
-            .iter()
-            .map(|&t| self.token2str.get(t as usize).map_or("[UNK]", |v| v))
-            .collect();
-        println!(
-            "decoded normalized text in {:?}",
-            std::time::Instant::now() - start
-        );
-        denormalize(&normalized)
+        denormalize(&self.decode_normalized(v))
     }
 }
 
@@ -345,5 +385,13 @@ mod tests {
             s.len(),
             enc.len() * 2
         )
+    }
+
+    #[test]
+    fn byte_fallback() {
+        let tok = Tokenizer::train(&STRINGS.concat(), None);
+        let s = "龍";
+        // assert_eq!("<e9><be><8d>", tok.decode(&tok.encode(s)));
+        assert_eq!(s, tok.decode(&tok.encode(s)));
     }
 }
