@@ -78,8 +78,8 @@ impl Tokenizer {
                 for (i, p) in chunk_v.windows(2).enumerate() {
                     bootstrap_counts
                         .entry((p[0].value, p[1].value))
-                        .or_insert(HashSet::new())
-                        .insert((chunk, i));
+                        .or_insert(Vec::new())
+                        .push((chunk, i));
                 }
             }
             println!(
@@ -88,31 +88,31 @@ impl Tokenizer {
             );
             let mut pq_counts = PriorityQueue::with_capacity(bootstrap_counts.len());
             for (k, v) in bootstrap_counts {
-                pq_counts.push(k, StableOrdHashSet(v, k));
+                pq_counts.push(k, StableOrdHashSet(v.into_iter().collect(), k));
             }
             while protostack.len() < vocab_size {
-                match pq_counts.peek() {
+                match pq_counts.pop() {
                     Some(((pair1, pair2), positions_set)) => {
                         let token = protostack.len() as Token;
-                        protostack.push(ProtoToken::Pair(*pair1 as usize, *pair2 as usize));
+                        protostack.push(ProtoToken::Pair(pair1 as usize, pair2 as usize));
 
-                        let mut positions: Vec<_> = positions_set.0.iter().collect();
-                        positions.sort_by_key(|(_chunk, i)| i);
-                        let mut decrements: HashMap<(u16, u16), HashSet<(usize, usize)>> =
+                        let mut positions: Vec<_> = positions_set.0.into_iter().collect();
+                        positions.sort_by_key(|(_chunk, i)| *i);
+                        let mut decrements: HashMap<(u16, u16), Vec<(usize, usize)>> =
                             HashMap::new();
                         let mut addons: HashMap<(u16, u16), HashSet<(usize, usize)>> =
                             HashMap::new();
                         for (c, first_index) in positions.into_iter().rev() {
-                            if let Some(second_index) = chunks[*c][*first_index].next {
+                            if let Some(second_index) = chunks[c][first_index].next {
                                 if let Some((left, left_pos)) =
-                                    chunks[*c][*first_index].prev.map(|left_pos| {
-                                        ((chunks[*c][left_pos].value, *pair1), (*c, left_pos))
+                                    chunks[c][first_index].prev.map(|left_pos| {
+                                        ((chunks[c][left_pos].value, pair1), (c, left_pos))
                                     })
                                 {
                                     if let Some(set) = decrements.get_mut(&left) {
-                                        set.insert(left_pos);
+                                        set.push(left_pos);
                                     } else {
-                                        decrements.insert(left, HashSet::from([left_pos]));
+                                        decrements.insert(left, vec![left_pos]);
                                     }
 
                                     if let Some(set) = addons.get_mut(&(left.0, token)) {
@@ -122,17 +122,17 @@ impl Tokenizer {
                                     }
                                 }
 
-                                let current_pos = (*c, *first_index);
+                                let current_pos = (c, first_index);
 
                                 if let Some((right, right_pos)) =
-                                    chunks[*c][second_index].next.map(|right_2pos| {
-                                        ((*pair2, chunks[*c][right_2pos].value), (*c, second_index))
+                                    chunks[c][second_index].next.map(|right_2pos| {
+                                        ((pair2, chunks[c][right_2pos].value), (c, second_index))
                                     })
                                 {
                                     if let Some(set) = decrements.get_mut(&right) {
-                                        set.insert(right_pos);
+                                        set.push(right_pos);
                                     } else {
-                                        decrements.insert(right, HashSet::from([right_pos]));
+                                        decrements.insert(right, vec![right_pos]);
                                     }
 
                                     if let Some(set) = addons.get_mut(&(token, right.1)) {
@@ -143,12 +143,11 @@ impl Tokenizer {
                                     }
                                 }
 
-                                chunks[*c][*first_index].next = chunks[*c][second_index].next;
-                                chunks[*c][*first_index].value = token;
-                                chunks[*c][second_index].next = None;
+                                chunks[c][first_index].next = chunks[c][second_index].next;
+                                chunks[c][first_index].value = token;
+                                chunks[c][second_index].next = None;
                             }
                         }
-                        pq_counts.remove(&(*pair1, *pair2));
 
                         for (key, remove) in decrements {
                             pq_counts.change_priority_by(&key, |priority_set| {
