@@ -5,7 +5,7 @@ mod pair_ordering;
 mod prepare;
 mod utils;
 
-use aho_corasick::AhoCorasick;
+use daachorse::{DoubleArrayAhoCorasick, DoubleArrayAhoCorasickBuilder, MatchKind};
 use priority_queue::PriorityQueue;
 
 use crate::{
@@ -17,7 +17,7 @@ pub type Token = u16;
 
 pub struct Tokenizer {
     token2str: Vec<String>,
-    str2token_ac: AhoCorasick,
+    str2token_ac: DoubleArrayAhoCorasick<Token>,
 }
 
 impl Tokenizer {
@@ -61,9 +61,8 @@ impl Tokenizer {
         };
 
         let mut tokenizer = Self {
-            str2token_ac: AhoCorasick::builder()
-                .kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA))
-                .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+            str2token_ac: DoubleArrayAhoCorasickBuilder::new()
+                .match_kind(MatchKind::LeftmostLongest)
                 .build(
                     (0..256)
                         .map(|i| &BYTES[i..=i])
@@ -199,9 +198,8 @@ impl Tokenizer {
                     .concat();
                 tokenizer.token2str.push(s.clone());
             }
-            tokenizer.str2token_ac = AhoCorasick::builder()
-                .kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA))
-                .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+            tokenizer.str2token_ac = DoubleArrayAhoCorasickBuilder::new()
+                .match_kind(MatchKind::LeftmostLongest)
                 .build(
                     (0..256)
                         .map(|i| &BYTES[i..=i])
@@ -214,8 +212,8 @@ impl Tokenizer {
 
     fn encode_normalized(&self, s: &str) -> Vec<Token> {
         self.str2token_ac
-            .find_iter(s)
-            .map(|mat| mat.pattern().as_u32() as Token)
+            .leftmost_find_iter(s)
+            .map(|mat| mat.value())
             .collect()
     }
 
