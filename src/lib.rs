@@ -77,52 +77,61 @@ impl Tokenizer {
             .collect();
 
         if let Some(vocab_size) = vocab_size {
-            let mut chunks: Vec<Vec<ArenaNode>> = chunks(&normalize(s))
-                .map(|str_chunk| {
-                    let mut chunk: Vec<ArenaNode> = tokenizer
-                        .encode_normalized(str_chunk)
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &tok)| ArenaNode {
-                            value: tok,
-                            prev: if i > 0 { Some(i - 1) } else { None },
-                            next: Some(i + 1),
-                        })
-                        .collect();
-                    chunk.last_mut().unwrap().next = None;
-                    chunk
-                })
-                .collect();
+            let mut str2id = HashMap::new();
+            let mut pieces: Vec<(Vec<ArenaNode>, u32)> =
+                chunks(&normalize(s)).fold(Vec::new(), |mut pieces, str_chunk| {
+                    if let Some(id) = str2id.get(str_chunk) {
+                        pieces[*id as usize].1 += 1;
+                        pieces
+                    } else {
+                        let id = str2id.len() as u32;
+                        let mut chunk: Vec<ArenaNode> = tokenizer
+                            .encode_normalized(str_chunk)
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &tok)| ArenaNode {
+                                value: tok,
+                                prev: if i > 0 { Some(i - 1) } else { None },
+                                next: Some(i + 1),
+                            })
+                            .collect();
+                        chunk.last_mut().unwrap().next = None;
+                        pieces.push((chunk, id));
+                        str2id.insert(str_chunk, id);
+                        pieces
+                    }
+                });
             let mut bootstrap_counts = HashMap::new();
-            for (chunk, chunk_v) in chunks.iter().enumerate() {
+            for (id, (chunk_v, scale)) in pieces.iter().enumerate() {
                 for (i, p) in chunk_v.windows(2).enumerate() {
                     bootstrap_counts
                         .entry((p[0].value, p[1].value))
-                        .or_insert(Vec::new())
-                        .push((chunk, i));
+                        .or_insert((Vec::new(), scale))
+                        .0
+                        .push((id, i));
                 }
             }
             let mut pq_counts = PriorityQueue::with_capacity(bootstrap_counts.len());
             for (k, v) in bootstrap_counts {
-                pq_counts.push(k, StableOrdHashSet(v.into_iter().collect(), k));
+                pq_counts.push(k, StableOrdHashSet(v.0.into_iter().collect(), k, *v.1));
             }
             while protostack.len() < vocab_size {
                 match pq_counts.pop() {
-                    Some(((pair1, pair2), positions_set)) => {
+                    Some(((pair1, pair2), StableOrdHashSet(positions_set, _, scale))) => {
                         let token = protostack.len() as Token;
                         protostack.push(ProtoToken::Pair(pair1 as usize, pair2 as usize));
 
-                        let mut positions: Vec<_> = positions_set.0.into_iter().collect();
-                        positions.sort_by_key(|(_chunk, i)| *i);
+                        let mut positions: Vec<_> = positions_set.into_iter().collect();
+                        positions.sort_by_key(|(_chunk_id, i)| *i);
                         let mut decrements: HashMap<(u16, u16), Vec<(usize, usize)>> =
                             HashMap::new();
                         let mut addons: HashMap<(u16, u16), HashSet<(usize, usize)>> =
                             HashMap::new();
-                        for (c, first_index) in positions.into_iter().rev() {
-                            if let Some(second_index) = chunks[c][first_index].next {
+                        for (id, first_index) in positions.into_iter().rev() {
+                            if let Some(second_index) = pieces[id].0[first_index].next {
                                 if let Some((left, left_pos)) =
-                                    chunks[c][first_index].prev.map(|left_pos| {
-                                        ((chunks[c][left_pos].value, pair1), (c, left_pos))
+                                    pieces[id].0[first_index].prev.map(|left_pos| {
+                                        ((pieces[id].0[left_pos].value, pair1), (id, left_pos))
                                     })
                                 {
                                     if let Some(set) = decrements.get_mut(&left) {
@@ -138,11 +147,14 @@ impl Tokenizer {
                                     }
                                 }
 
-                                let current_pos = (c, first_index);
+                                let current_pos = (id, first_index);
 
                                 if let Some((right, right_pos)) =
-                                    chunks[c][second_index].next.map(|right_2pos| {
-                                        ((pair2, chunks[c][right_2pos].value), (c, second_index))
+                                    pieces[id].0[second_index].next.map(|right_2pos| {
+                                        (
+                                            (pair2, pieces[id].0[right_2pos].value),
+                                            (id, second_index),
+                                        )
                                     })
                                 {
                                     if let Some(set) = decrements.get_mut(&right) {
@@ -159,9 +171,9 @@ impl Tokenizer {
                                     }
                                 }
 
-                                chunks[c][first_index].next = chunks[c][second_index].next;
-                                chunks[c][first_index].value = token;
-                                chunks[c][second_index].next = None;
+                                pieces[id].0[first_index].next = pieces[id].0[second_index].next;
+                                pieces[id].0[first_index].value = token;
+                                pieces[id].0[second_index].next = None;
                             }
                         }
 
@@ -174,7 +186,7 @@ impl Tokenizer {
                         }
 
                         for (key, insert) in addons {
-                            pq_counts.push(key, StableOrdHashSet(insert, key));
+                            pq_counts.push(key, StableOrdHashSet(insert, key, scale));
                         }
                     }
                     None => break,
