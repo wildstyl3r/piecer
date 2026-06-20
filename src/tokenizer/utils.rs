@@ -20,15 +20,10 @@ pub(crate) enum ProtoToken {
 }
 
 impl ProtoToken {
-    pub fn pieces<'b>(
-        &self,
-        as_token: Token,
-        tokens: &'b [String],
-        protostack: &[ProtoToken],
-    ) -> Vec<&'b str> {
+    pub fn pieces(&self, as_token: Token, tokens: &[String], protostack: &[ProtoToken]) -> String {
         match self {
             ProtoToken::Pair(a, b) => {
-                let mut result: Vec<&str> = Vec::new();
+                let mut result = String::new();
                 let mut stack = Vec::new();
                 stack.push(b);
                 stack.push(a);
@@ -39,12 +34,12 @@ impl ProtoToken {
                             stack.push(b);
                             stack.push(a);
                         }
-                        ProtoToken::Token(t) => result.push(&tokens[*t as usize]),
+                        ProtoToken::Token(t) => result += &tokens[*t as usize],
                     }
                 }
                 result
             }
-            ProtoToken::Token(_) => vec![&tokens[as_token as usize]],
+            ProtoToken::Token(_) => String::from(&tokens[as_token as usize]),
         }
     }
 }

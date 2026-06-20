@@ -2,13 +2,6 @@ mod arena_list;
 mod pair_ordering;
 mod utils;
 
-use crate::{
-    Token,
-    tokenizer::{
-        arena_list::ArenaList,
-        utils::{Export, Import, ProtoToken},
-    },
-};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -18,10 +11,26 @@ use std::{
 
 use daachorse::{DoubleArrayAhoCorasick, DoubleArrayAhoCorasickBuilder, MatchKind};
 use priority_queue::PriorityQueue;
+use rustc_hash::FxHashMap;
 
 use crate::{
+    Token,
     prepare::{chunks, denormalize, normalize},
-    tokenizer::pair_ordering::PairOrd,
+    tokenizer::{
+        arena_list::ArenaList,
+        pair_ordering::PairOrd,
+        utils::{Export, Import, ProtoToken},
+    },
+};
+
+static BYTES: [u8; 256] = {
+    let mut arr = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        arr[i] = i as u8;
+        i += 1;
+    }
+    arr
 };
 
 pub struct Tokenizer {
@@ -34,15 +43,7 @@ impl Tokenizer {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         let external: Import = serde_json::from_reader(reader).map_err(std::io::Error::other)?;
-        static BYTES: [u8; 256] = {
-            let mut arr = [0u8; 256];
-            let mut i = 0;
-            while i < 256 {
-                arr[i] = i as u8;
-                i += 1;
-            }
-            arr
-        };
+
         Ok(Self {
             str2token_ac: DoubleArrayAhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
@@ -110,16 +111,6 @@ impl Tokenizer {
         extension.sort();
         alphabet.extend(extension);
 
-        static BYTES: [u8; 256] = {
-            let mut arr = [0u8; 256];
-            let mut i = 0;
-            while i < 256 {
-                arr[i] = i as u8;
-                i += 1;
-            }
-            arr
-        };
-
         let mut tokenizer = Self {
             str2token_ac: DoubleArrayAhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
@@ -153,13 +144,13 @@ impl Tokenizer {
                             pieces
                         }
                     });
-            let mut pair_positions = HashMap::new();
+            let mut pair_positions = FxHashMap::default();
             for (piece_id, (chunk_v, _scale)) in pieces.iter().enumerate() {
                 for (index, p) in chunk_v.raw_pairs().enumerate() {
                     pair_positions
                         .entry((p[0].value, p[1].value))
-                        .or_insert(HashSet::new())
-                        .insert((piece_id, index));
+                        .or_insert(Vec::new())
+                        .push((piece_id, index));
                 }
             }
             let mut pq_counts = PriorityQueue::with_capacity(pair_positions.len());
@@ -173,70 +164,62 @@ impl Tokenizer {
                     ),
                 );
             }
+
+            let mut decrements: FxHashMap<(u16, u16), u32> = FxHashMap::default();
+            let mut addons: FxHashMap<(u16, u16), Vec<(usize, usize)>> = FxHashMap::default();
             while protostack.len() < vocab_size {
                 match pq_counts.pop() {
                     Some((pair, _)) => {
                         let token = protostack.len() as Token;
                         protostack.push(ProtoToken::Pair(pair.0 as usize, pair.1 as usize));
 
-                        let mut positions: Vec<_> =
-                            pair_positions.remove(&pair).unwrap().into_iter().collect();
-                        positions.sort_by_key(|(_, i)| *i);
-                        let mut decrements: HashMap<(u16, u16), Vec<(usize, usize)>> =
-                            HashMap::new();
-                        let mut addons: HashMap<(u16, u16), HashSet<(usize, usize)>> =
-                            HashMap::new();
+                        let positions: Vec<_> = pair_positions.remove(&pair).unwrap();
                         for (piece_id, ab_pos) in positions {
                             // XABY -> XTY: [XA]--, [BY]--, AB=>T, [XT]++, [TY]++
-                            if pieces[piece_id].0.pair_at(ab_pos).is_some() {
-                                if let Some((xa, xa_pos)) = pieces[piece_id].0.prev_pair_pos(ab_pos)
+                            if Some(pair) == pieces[piece_id].0.pair_at(ab_pos) {
+                                if let Some((xa, _xa_pos)) =
+                                    pieces[piece_id].0.prev_pair_pos(ab_pos)
                                 {
-                                    if let Some(set) = decrements.get_mut(&xa) {
-                                        set.push((piece_id, xa_pos));
+                                    if let Some(count) = decrements.get_mut(&xa) {
+                                        *count += pieces[piece_id].1;
                                     } else {
-                                        decrements.insert(xa, vec![(piece_id, xa_pos)]);
+                                        decrements.insert(xa, pieces[piece_id].1);
                                     }
                                 }
-                                if let Some((by, by_pos)) = pieces[piece_id].0.next_pair_pos(ab_pos)
+                                if let Some((by, _by_pos)) =
+                                    pieces[piece_id].0.next_pair_pos(ab_pos)
                                 {
-                                    if let Some(set) = decrements.get_mut(&by) {
-                                        set.push((piece_id, by_pos));
+                                    if let Some(count) = decrements.get_mut(&by) {
+                                        *count += pieces[piece_id].1;
                                     } else {
-                                        decrements.insert(by, vec![(piece_id, by_pos)]);
+                                        decrements.insert(by, pieces[piece_id].1);
                                     }
                                 }
                                 let (xt_opt, ty_opt) = pieces[piece_id].0.fuse_into(ab_pos, token);
                                 if let Some((xt, xt_pos)) = xt_opt {
                                     if let Some(set) = addons.get_mut(&xt) {
-                                        set.insert((piece_id, xt_pos));
+                                        set.push((piece_id, xt_pos));
                                     } else {
-                                        addons.insert(xt, HashSet::from([(piece_id, xt_pos)]));
+                                        addons.insert(xt, Vec::from([(piece_id, xt_pos)]));
                                     }
                                 }
                                 if let Some((ty, ty_pos)) = ty_opt {
                                     if let Some(set) = addons.get_mut(&ty) {
-                                        set.insert((piece_id, ty_pos));
+                                        set.push((piece_id, ty_pos));
                                     } else {
-                                        addons.insert(ty, HashSet::from([(piece_id, ty_pos)]));
+                                        addons.insert(ty, Vec::from([(piece_id, ty_pos)]));
                                     }
                                 }
                             }
                         }
 
-                        for (key, remove) in decrements {
-                            if let Some(positions) = pair_positions.get_mut(&key) {
-                                for pos in &remove {
-                                    positions.remove(pos);
-                                }
-                            }
+                        for (key, decrement) in decrements.drain() {
                             pq_counts.change_priority_by(&key, |pair_priority| {
-                                for (piece_id, _index) in remove {
-                                    pair_priority.0 -= pieces[piece_id].1;
-                                }
+                                pair_priority.0 -= decrement
                             });
                         }
 
-                        for (key, insert) in addons {
+                        for (key, insert) in addons.drain() {
                             pq_counts.push(
                                 key,
                                 PairOrd(
@@ -254,10 +237,9 @@ impl Tokenizer {
             }
             let base_len = tokenizer.token2str.len();
             for (i, pt) in protostack.iter().enumerate().skip(base_len) {
-                let s = pt
-                    .pieces(i as Token, &tokenizer.token2str, &protostack)
-                    .concat();
-                tokenizer.token2str.push(s.clone());
+                tokenizer
+                    .token2str
+                    .push(pt.pieces(i as Token, &tokenizer.token2str, &protostack));
             }
             tokenizer.str2token_ac = DoubleArrayAhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)

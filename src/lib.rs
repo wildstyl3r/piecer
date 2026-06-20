@@ -10,7 +10,7 @@ pub type Token = u16;
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::Instant};
+    use std::{fs, path::Path, time::Instant};
 
     use crate::{prepare::*, tokenizer::Tokenizer};
 
@@ -138,6 +138,34 @@ mod tests {
         let start = Instant::now();
         let enc = tok.encode(&s);
         println!("encoded in {:?}", Instant::now() - start);
+        let start = Instant::now();
+        let dec = tok.decode(&enc);
+        println!("decoded in {:?}", Instant::now() - start);
+        assert_eq!(s, dec);
+        println!("total time {:?}", Instant::now() - s0);
+        println!(
+            "original byte len: {}, encoded byte len: {}",
+            s.len(),
+            enc.len() * 2
+        )
+    }
+
+    #[test]
+    fn save_load() {
+        let s = fs::read_to_string("big.txt").unwrap();
+        let s0 = Instant::now();
+        let start = Instant::now();
+        let tok = Tokenizer::train(&s, Some(10000));
+        println!("trained in {:?}", Instant::now() - start);
+        let start = Instant::now();
+        let enc = tok.encode(&s);
+        println!("encoded in {:?}", Instant::now() - start);
+        let start = Instant::now();
+        assert!(tok.save(Path::new("tok.json")).is_ok());
+        println!("saved in {:?}", Instant::now() - start);
+        let start = Instant::now();
+        let tok = Tokenizer::load(Path::new("tok.json")).unwrap();
+        println!("loaded in {:?}", Instant::now() - start);
         let start = Instant::now();
         let dec = tok.decode(&enc);
         println!("decoded in {:?}", Instant::now() - start);

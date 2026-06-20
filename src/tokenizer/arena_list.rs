@@ -11,8 +11,6 @@ pub(crate) struct ArenaNode {
     next: Option<usize>,
 }
 
-// pub(crate) struct PairPos(pub usize, pub usize);
-
 pub(crate) struct ArenaList(Vec<ArenaNode>);
 impl ArenaList {
     fn last_mut(&mut self) -> Option<&mut ArenaNode> {
