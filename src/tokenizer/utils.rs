@@ -1,9 +1,17 @@
+use serde::{Deserialize, Serialize};
+
 use crate::Token;
 
-pub(crate) struct ArenaNode {
-    pub value: Token,
-    pub prev: Option<usize>,
-    pub next: Option<usize>,
+#[derive(Serialize)]
+pub(crate) struct Export<'a> {
+    pub version: &'static str,
+    pub vocabulary: &'a [String],
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Import {
+    pub version: String,
+    pub vocabulary: Vec<String>,
 }
 
 pub(crate) enum ProtoToken {

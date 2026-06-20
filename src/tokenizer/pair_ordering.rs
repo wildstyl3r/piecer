@@ -1,28 +1,26 @@
-use std::collections::HashSet;
-
 use crate::Token;
 
 #[derive(Debug, Eq)]
-pub struct StableOrdHashSet(pub HashSet<(usize, usize)>, pub (Token, Token), pub u32);
-impl StableOrdHashSet {
+pub struct PairOrd(pub u32, pub (Token, Token));
+impl PairOrd {
     fn len(&self) -> usize {
-        self.0.len() * self.2 as usize
+        self.0 as usize
     }
 }
 
-impl PartialEq for StableOrdHashSet {
+impl PartialEq for PairOrd {
     fn eq(&self, other: &Self) -> bool {
-        (self.len() == other.len()) && (self.1 == other.1)
+        self.1 == other.1
     }
 }
 
-impl PartialOrd for StableOrdHashSet {
+impl PartialOrd for PairOrd {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for StableOrdHashSet {
+impl Ord for PairOrd {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.len()
             .cmp(&other.len())

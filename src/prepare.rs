@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use regex::Regex;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -103,10 +104,82 @@ pub(crate) fn denormalize(s: &str) -> String {
     result
 }
 
-pub(crate) fn chunks(s: &str) -> impl Iterator<Item = &str> {
-    let pattern = r"'(?:[stmd]|re|ve|ll)|▁(\p{L}+(?:[\p{L}-]*\p{L})?|\p{N}{1,3})|\p{N}{1,3}|[^\s\p{L}\p{N}▁]+|\s+";
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(pattern).unwrap());
+enum Chunk<'a> {
+    Whitespace(&'a str),
+    Text(&'a str),
+}
 
-    re.find_iter(s).map(|mat| mat.as_str())
+enum LocalIter<'a, I> {
+    Once(std::iter::Once<&'a str>),
+    Regex(I),
+}
+
+impl<'a, I> Iterator for LocalIter<'a, I>
+where
+    I: Iterator<Item = &'a str>,
+{
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            LocalIter::Once(iter) => iter.next(),
+            LocalIter::Regex(iter) => iter.next(),
+        }
+    }
+}
+
+pub(crate) fn chunks(s: &str) -> Vec<&str> {
+    //impl Iterator<Item = &str> {
+    // let pattern = r"'(?:[stmd]|re|ve|ll)|▁(\p{L}+(?:[\p{L}-]*\p{L})?|\p{N}{1,3})|\p{N}{1,3}|[^\s\p{L}\p{N}▁]+|\s+";
+    // static RE: OnceLock<Regex> = OnceLock::new();
+    // let re = RE.get_or_init(|| Regex::new(pattern).unwrap());
+
+    // re.find_iter(s).map(|mat| mat.as_str())
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        let pattern = r"(?:[stmd]|re|ve|ll)|▁(\p{L}+(?:[\p{L}-]*\p{L})?|\p{N}{1,3})|\p{N}{1,3}|[^\s\p{L}\p{N}▁]+";
+        Regex::new(pattern).unwrap()
+    });
+
+    let mut chunks = Vec::new();
+    let mut last_idx = 0;
+    let mut in_whitespace = None;
+
+    for (idx, ch) in s.char_indices() {
+        let is_ws = ch.is_whitespace();
+        if let Some(ws) = in_whitespace {
+            if ws != is_ws {
+                let slice = &s[last_idx..idx];
+                if ws {
+                    chunks.push(Chunk::Whitespace(slice));
+                } else {
+                    chunks.push(Chunk::Text(slice));
+                }
+                last_idx = idx;
+                in_whitespace = Some(is_ws);
+            }
+        } else {
+            in_whitespace = Some(is_ws);
+        }
+    }
+
+    if last_idx < s.len() {
+        let slice = &s[last_idx..];
+        if in_whitespace.unwrap_or(false) {
+            chunks.push(Chunk::Whitespace(slice));
+        } else {
+            chunks.push(Chunk::Text(slice));
+        }
+    }
+
+    chunks
+        .into_par_iter()
+        .flat_map_iter(|chunk| match chunk {
+            Chunk::Whitespace(ws) => LocalIter::Once(std::iter::once(ws)),
+            Chunk::Text(txt) => {
+                let iter = re.find_iter(txt).map(|mat| mat.as_str());
+                LocalIter::Regex(iter)
+            }
+        })
+        .collect()
 }
