@@ -6,7 +6,7 @@ license = "MIT"
 keywords = ["tokenizer", "natural-language-processing"]
 description = "Unicode codepoint BPE tokenizer featuring byte fallback and optional byte-level-only tokenization"
 repository = "https://github.com/wildstyl3r/piecer"
-exclude = ["*.txt"]
+exclude = ["*.txt", "*.json"]
 
 [dependencies]
 daachorse = "3.0.2"
