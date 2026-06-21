@@ -1,7 +1,4 @@
-use std::{
-    borrow::Borrow,
-    ops::{Index, IndexMut},
-};
+use std::borrow::Borrow;
 
 use crate::Token;
 
