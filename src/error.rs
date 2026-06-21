@@ -7,4 +7,6 @@ pub enum TokenizerError {
     Io(#[from] std::io::Error),
     #[error("Deserialization failure")]
     Deserialization(#[from] Error),
+    #[error("Vocabulary version mismatch")]
+    Vocabulary(String),
 }

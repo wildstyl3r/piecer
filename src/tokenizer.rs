@@ -100,30 +100,40 @@ impl Tokenizer {
         let reader = BufReader::new(file);
         let external: Import = serde_json::from_reader(reader)?;
 
-        Ok(Self {
-            str2token_ac: DoubleArrayAhoCorasickBuilder::new()
-                .match_kind(MatchKind::LeftmostLongest)
-                .build(
-                    (0..256)
-                        .map(|i| &BYTES[i..=i])
-                        .chain(std::iter::once("▁".as_bytes()))
-                        .chain(external.vocabulary.iter().map(|tok| tok.as_bytes())),
-                )
-                .unwrap(),
-            token2str: (0..0x20u8)
-                .map(|b| {
-                    if b == b'\t' || b == b'\n' || b == b'\r' {
-                        (b as char).to_string()
-                    } else {
-                        format!("<{:02x}>", b)
-                    }
-                })
-                .chain((0x20u8..0x7f).map(|b| (b as char).to_string()))
-                .chain((0x7f..=0xffu8).map(|b| format!("<{:02x}>", b)))
-                .chain(std::iter::once("▁".to_string()))
-                .chain(external.vocabulary)
-                .collect::<Vec<_>>(),
-        })
+        if external
+            .version
+            .split(".")
+            .next()
+            .map(|major| major == env!("CARGO_PKG_VERSION_MAJOR"))
+            .unwrap_or(false)
+        {
+            Ok(Self {
+                str2token_ac: DoubleArrayAhoCorasickBuilder::new()
+                    .match_kind(MatchKind::LeftmostLongest)
+                    .build(
+                        (0..256)
+                            .map(|i| &BYTES[i..=i])
+                            .chain(std::iter::once("▁".as_bytes()))
+                            .chain(external.vocabulary.iter().map(|tok| tok.as_bytes())),
+                    )
+                    .unwrap(),
+                token2str: (0..0x20u8)
+                    .map(|b| {
+                        if b == b'\t' || b == b'\n' || b == b'\r' {
+                            (b as char).to_string()
+                        } else {
+                            format!("<{:02x}>", b)
+                        }
+                    })
+                    .chain((0x20u8..0x7f).map(|b| (b as char).to_string()))
+                    .chain((0x7f..=0xffu8).map(|b| format!("<{:02x}>", b)))
+                    .chain(std::iter::once("▁".to_string()))
+                    .chain(external.vocabulary)
+                    .collect::<Vec<_>>(),
+            })
+        } else {
+            Err(TokenizerError::Vocabulary(external.version))
+        }
     }
 
     /// Saves the tokenizer vocabulary to a JSON file.
