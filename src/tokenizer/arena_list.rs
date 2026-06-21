@@ -1,20 +1,21 @@
 use std::borrow::Borrow;
 
-use crate::Token;
+use crate::TokenType;
 
-pub(crate) struct ArenaNode {
-    pub value: Token,
+pub(crate) struct ArenaNode<T> {
+    pub value: T,
     prev: Option<usize>,
     next: Option<usize>,
 }
 
-pub(crate) struct ArenaList(Vec<ArenaNode>);
-impl ArenaList {
-    fn last_mut(&mut self) -> Option<&mut ArenaNode> {
+pub(crate) struct ArenaList<T>(Vec<ArenaNode<T>>);
+
+impl<T: TokenType> ArenaList<T> {
+    fn last_mut(&mut self) -> Option<&mut ArenaNode<T>> {
         self.0.last_mut()
     }
 
-    pub fn raw_pairs(&self) -> std::slice::Windows<'_, ArenaNode> {
+    pub fn raw_pairs(&self) -> std::slice::Windows<'_, ArenaNode<T>> {
         self.0.windows(2)
     }
 
@@ -35,7 +36,7 @@ impl ArenaList {
         }
     }
 
-    pub fn pair_at(&self, first: usize) -> Option<(Token, Token)> {
+    pub fn pair_at(&self, first: usize) -> Option<(T, T)> {
         if first >= self.0.len() - 1 {
             None
         } else {
@@ -45,7 +46,7 @@ impl ArenaList {
         }
     }
 
-    pub fn prev_pair_pos(&self, second: usize) -> Option<((Token, Token), usize)> {
+    pub fn prev_pair_pos(&self, second: usize) -> Option<((T, T), usize)> {
         if second > self.0.len() - 1 {
             None
         } else {
@@ -55,7 +56,7 @@ impl ArenaList {
         }
     }
 
-    pub fn next_pair_pos(&self, proto: usize) -> Option<((Token, Token), usize)> {
+    pub fn next_pair_pos(&self, proto: usize) -> Option<((T, T), usize)> {
         if proto >= self.0.len() - 1 {
             None
         } else {
@@ -71,10 +72,10 @@ impl ArenaList {
     pub fn fuse_into(
         &mut self,
         index: usize,
-        tok: Token,
+        tok: T,
     ) -> (
-        Option<((Token, Token), usize)>,
-        Option<((Token, Token), usize)>,
+        Option<((T, T), usize)>,
+        Option<((T, T), usize)>,
     ) {
         match self.0[index].next {
             Some(second) => {
@@ -90,11 +91,12 @@ impl ArenaList {
     }
 }
 
-impl<I> FromIterator<I> for ArenaList
+impl<I, T> FromIterator<I> for ArenaList<T>
 where
-    I: Borrow<Token>,
+    I: Borrow<T>,
+    T: TokenType,
 {
-    fn from_iter<T: IntoIterator<Item = I>>(iter: T) -> Self {
+    fn from_iter<It: IntoIterator<Item = I>>(iter: It) -> Self {
         let mut al = ArenaList(Vec::new());
         for (i, value) in iter.into_iter().enumerate() {
             al.0.push(ArenaNode {

@@ -6,6 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::File,
     io::{BufReader, BufWriter},
+    mem::size_of,
     path::Path,
 };
 
@@ -14,7 +15,7 @@ use priority_queue::PriorityQueue;
 use rustc_hash::FxHashMap;
 
 use crate::{
-    Token,
+    Token, TokenType,
     error::TokenizerError,
     prepare::{chunks, denormalize, normalize},
     tokenizer::{
@@ -40,16 +41,17 @@ static BYTES: [u8; 256] = {
 ///
 /// # Token representation
 ///
-/// Tokens are `u16` values. Tokens `0..256` correspond to single bytes (with printable
+/// Tokens are `T` values where `T: `[`TokenType`]. By default, `T = `[`Token`](`u16`).
+/// Tokens `0..256` correspond to single bytes (with printable
 /// ASCII mapped to their character representation and control/high bytes to `<hex>` notation). 257th token is the word-start symbol `▁`.
 /// Tokens `257..` are special tokens, plus Unicode codepoints extracted from the training data, plus those learned by BPE merges (if any).
 #[non_exhaustive]
-pub struct Tokenizer {
+pub struct Tokenizer<T: TokenType = Token> {
     token2str: Vec<String>,
-    str2token_ac: DoubleArrayAhoCorasick<Token>,
+    str2token_ac: DoubleArrayAhoCorasick<T>,
 }
 
-impl Tokenizer {
+impl<T: TokenType> Tokenizer<T> {
     /// Returns the total vocabulary size (byte tokens + codepoint + BPE merge tokens).
     pub fn vocab_size(&self) -> usize {
         self.token2str.len()
@@ -60,8 +62,8 @@ impl Tokenizer {
     /// Returns `None` if the token ID exceeds the vocabulary range.
     /// For byte tokens `0..256`, this returns the byte's display form
     /// (printable ASCII as-is, others as `<hex>`).
-    pub fn token_to_string(&self, tok: Token) -> Option<&str> {
-        self.token2str.get(tok as usize).map(|s| s.as_str())
+    pub fn token_to_string(&self, tok: T) -> Option<&str> {
+        self.token2str.get(tok.to_index()).map(|s| s.as_str())
     }
 
     /// Maps a string to its token ID, if the string corresponds to a single token.
@@ -69,11 +71,11 @@ impl Tokenizer {
     /// Returns `None` if the string is not present as an atomic vocabulary entry.
     /// Note that multi-token sequences (e.g. `"hello world"`) will not match —
     /// this only succeeds when the entire input maps to exactly one token.
-    pub fn str_to_token(&self, s: &str) -> Option<Token> {
+    pub fn str_to_token(&self, s: &str) -> Option<T> {
         let mut it = self.str2token_ac.leftmost_find_iter(s).map(|m| m.value());
         match (it.next(), it.next()) {
             (Some(tok), None) => {
-                if self.token2str[tok as usize] == s {
+                if self.token2str[tok.to_index()] == s {
                     Some(tok)
                 } else {
                     None
@@ -87,11 +89,11 @@ impl Tokenizer {
     ///
     /// Byte tokens come first (0..256), followed by sorted Unicode codepoints
     /// and BPE merge tokens in merge order.
-    pub fn tokens(&self) -> impl Iterator<Item = (Token, &str)> {
+    pub fn tokens(&self) -> impl Iterator<Item = (T, &str)> {
         self.token2str
             .iter()
             .enumerate()
-            .map(|(i, s)| (i as Token, s.as_str()))
+            .map(|(i, s)| (T::from_index(i), s.as_str()))
     }
 
     /// Loads a tokenizer from a JSON file previously saved with [`Tokenizer::save`].
@@ -107,6 +109,14 @@ impl Tokenizer {
             .map(|major| major == env!("CARGO_PKG_VERSION_MAJOR"))
             .unwrap_or(false)
         {
+            let vocab_size = 257 + external.vocabulary.len();
+            if vocab_size > T::max_index() + 1 {
+                return Err(TokenizerError::Vocabulary(format!(
+                    "vocabulary size {} exceeds maximum for token type (max {})",
+                    vocab_size,
+                    T::max_index() + 1
+                )));
+            }
             Ok(Self {
                 str2token_ac: DoubleArrayAhoCorasickBuilder::new()
                     .match_kind(MatchKind::LeftmostLongest)
@@ -186,7 +196,7 @@ impl Tokenizer {
             })
             .into_iter()
             .collect::<Vec<_>>();
-        extension.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b))); //longest-first, then alphabetically
+        extension.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
         alphabet.extend(
             special_tokens.iter().map(|&s| s.to_string()).chain(
                 extension
@@ -207,12 +217,12 @@ impl Tokenizer {
             token2str: alphabet,
         };
         let mut protostack: Vec<_> = (0..tokenizer.token2str.len())
-            .map(|i| ProtoToken::Token(i as Token))
+            .map(|i| ProtoToken::Token(T::from_index(i)))
             .collect();
 
         if let Some(extra_tokens) = max_extra_tokens {
             let mut str2id = HashMap::new();
-            let mut pieces: Vec<(ArenaList, u32)> =
+            let mut pieces: Vec<(ArenaList<T>, u32)> =
                 chunks(&normalize(s))
                     .into_iter()
                     .fold(Vec::new(), |mut pieces, str_chunk| {
@@ -221,7 +231,8 @@ impl Tokenizer {
                             pieces
                         } else {
                             let id = str2id.len() as u32;
-                            let piece: ArenaList = tokenizer.encode_normalized(str_chunk).collect();
+                            let piece: ArenaList<T> =
+                                tokenizer.encode_normalized(str_chunk).collect();
                             pieces.push((piece, 1));
                             str2id.insert(str_chunk, id);
                             pieces
@@ -248,17 +259,19 @@ impl Tokenizer {
                 );
             }
 
-            let mut decrements: FxHashMap<(u16, u16), u32> = FxHashMap::default();
-            let mut addons: FxHashMap<(u16, u16), Vec<(usize, usize)>> = FxHashMap::default();
+            let mut decrements: FxHashMap<(T, T), u32> = FxHashMap::default();
+            let mut addons: FxHashMap<(T, T), Vec<(usize, usize)>> = FxHashMap::default();
             while protostack.len() - 257 < extra_tokens {
+                if protostack.len() > T::max_index() {
+                    break;
+                }
                 match pq_counts.pop() {
                     Some((pair, _)) => {
-                        let token = protostack.len() as Token;
-                        protostack.push(ProtoToken::Pair(pair.0 as usize, pair.1 as usize));
+                        let token = T::from_index(protostack.len());
+                        protostack.push(ProtoToken::Pair(pair.0.to_index(), pair.1.to_index()));
 
                         let positions: Vec<_> = pair_positions.remove(&pair).unwrap();
                         for (piece_id, ab_pos) in positions {
-                            // XABY -> XTY: [XA]--, [BY]--, AB=>T, [XT]++, [TY]++
                             if Some(pair) == pieces[piece_id].0.pair_at(ab_pos) {
                                 if let Some((xa, _xa_pos)) =
                                     pieces[piece_id].0.prev_pair_pos(ab_pos)
@@ -320,9 +333,11 @@ impl Tokenizer {
             }
             let base_len = tokenizer.token2str.len();
             for (i, pt) in protostack.iter().enumerate().skip(base_len) {
-                tokenizer
-                    .token2str
-                    .push(pt.pieces(i as Token, &tokenizer.token2str, &protostack));
+                tokenizer.token2str.push(pt.pieces(
+                    T::from_index(i),
+                    &tokenizer.token2str,
+                    &protostack,
+                ));
             }
             tokenizer.str2token_ac = DoubleArrayAhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
@@ -336,7 +351,7 @@ impl Tokenizer {
         tokenizer
     }
 
-    fn encode_normalized(&self, s: &str) -> impl Iterator<Item = Token> {
+    fn encode_normalized(&self, s: &str) -> impl Iterator<Item = T> {
         self.str2token_ac
             .leftmost_find_iter(s)
             .map(|mat| mat.value())
@@ -348,28 +363,34 @@ impl Tokenizer {
     /// and each chunk is matched against the vocabulary using leftmost-longest
     /// Aho-Corasick search. Characters not in the vocabulary fall back to their
     /// UTF-8 byte tokens.
-    pub fn encode(&self, s: &str) -> Vec<Token> {
+    pub fn encode(&self, s: &str) -> Vec<T> {
         self.encode_normalized(&normalize(s)).collect()
     }
 
-    fn decode_normalized(&self, v: &[Token]) -> String {
+    fn decode_normalized(&self, v: &[T]) -> String {
         let mut result = String::new();
         let mut byte_buff = Vec::new();
         for &t in v {
-            if t == 0x09 || t == 0x0a || t == 0x0d || (0x20..0x7f).contains(&t) || t > 0xff {
+            let t_u32 = t.to_u32();
+            if t_u32 == 0x09
+                || t_u32 == 0x0a
+                || t_u32 == 0x0d
+                || (0x20u32..0x7fu32).contains(&t_u32)
+                || t_u32 > 0xff
+            {
                 for &b in &byte_buff {
                     result.push_str(self.token2str[b as usize].as_str());
                 }
                 byte_buff.clear();
-                result.push_str(self.token2str[t as usize].as_str())
+                result.push_str(self.token2str[t.to_index()].as_str())
             } else {
-                if (0xc2..=0xf4).contains(&t) {
+                if (0xc2u32..=0xf4u32).contains(&t_u32) {
                     for &b in &byte_buff {
                         result.push_str(self.token2str[b as usize].as_str());
                     }
                     byte_buff.clear();
                 }
-                byte_buff.push(t as u8);
+                byte_buff.push(t_u32 as u8);
                 if let Ok(s) = str::from_utf8(&byte_buff) {
                     result.push_str(s);
                     byte_buff.clear();
@@ -387,7 +408,12 @@ impl Tokenizer {
     /// Consecutive byte tokens that form valid UTF-8 are reassembled into
     /// characters. The result is then denormalized (removing or converting `▁` markers
     /// back to spaces where appropriate).
-    pub fn decode(&self, v: &[Token]) -> String {
+    pub fn decode(&self, v: &[T]) -> String {
         denormalize(&self.decode_normalized(v))
+    }
+
+    /// Returns the size in bytes of a single token value.
+    pub fn token_size() -> usize {
+        size_of::<T>()
     }
 }

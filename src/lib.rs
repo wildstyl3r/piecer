@@ -21,7 +21,7 @@ of no more than 3 digits. and optionally `▁`, if it is in the beginning of the
 use piecer::Tokenizer;
 
 // Train a tokenizer with up to 512 merge operations
-let tok = Tokenizer::train("hello world", &["[PAD]"], Some(512));
+let tok: Tokenizer = Tokenizer::train("hello world", &["[PAD]"], Some(512));
 
 let tokens = tok.encode("hello world");
 let decoded = tok.decode(&tokens);
@@ -36,7 +36,7 @@ byte tokens and transparently reassembled on decode:
 ```
 use piecer::Tokenizer;
 
-let tok = Tokenizer::train("hello", &[], Some(512));
+let tok: Tokenizer = Tokenizer::train("hello", &[], Some(512));
 let tokens = tok.encode("龍");  // U+9F8D — not in training data
 assert_eq!("龍", tok.decode(&tokens));  // reassembled from <e9><be><8d>
  ```
@@ -47,9 +47,9 @@ assert_eq!("龍", tok.decode(&tokens));  // reassembled from <e9><be><8d>
 use piecer::Tokenizer;
 use std::path::Path;
 
-let tok = Tokenizer::train("some training text", &[], Some(512));
+let tok: Tokenizer = Tokenizer::train("some training text", &[], Some(512));
 tok.save(Path::new("my_tokenizer.json")).unwrap();
-let loaded = Tokenizer::load(Path::new("my_tokenizer.json")).unwrap();
+let loaded: Tokenizer = Tokenizer::load(Path::new("my_tokenizer.json")).unwrap();
 assert_eq!(tok.vocab_size(), loaded.vocab_size());
 ```
 
@@ -63,11 +63,33 @@ pub use crate::tokenizer::Tokenizer;
 
 pub type Token = u16;
 
+pub trait TokenType: Copy + Eq + std::hash::Hash + Ord + TryFrom<usize> + 'static {
+    fn to_index(self) -> usize;
+    fn from_index(i: usize) -> Self;
+    fn to_u32(self) -> u32;
+    fn max_index() -> usize;
+}
+
+macro_rules! impl_token_type {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl TokenType for $ty {
+                fn to_index(self) -> usize { self as usize }
+                fn from_index(i: usize) -> Self { i as $ty }
+                fn to_u32(self) -> u32 { self as u32 }
+                fn max_index() -> usize { <$ty>::MAX as usize }
+            }
+        )*
+    };
+}
+
+impl_token_type!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
+
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, time::Instant};
+    use std::{fs, mem::size_of, path::Path, time::Instant};
 
-    use crate::{prepare::*, tokenizer::Tokenizer};
+    use crate::{Token, prepare::*, tokenizer::Tokenizer};
 
     const NORM_STRINGS: &[(&str, &str)] = &[
         ("ABC\nabc", "▁ABC\n▁abc"),
@@ -160,7 +182,7 @@ mod tests {
 
     #[test]
     fn codepoint2token() {
-        let tok = Tokenizer::train(&STRINGS.concat(), &[], None);
+        let tok: Tokenizer = Tokenizer::train(&STRINGS.concat(), &[], None);
         for &s in STRINGS.iter() {
             let enc = tok.encode(s);
             let dec = tok.decode(&enc);
@@ -170,7 +192,7 @@ mod tests {
 
     #[test]
     fn codepoint_bpe() {
-        let tok = Tokenizer::train(&STRINGS.concat(), &[], Some(512));
+        let tok: Tokenizer = Tokenizer::train(&STRINGS.concat(), &[], Some(512));
         for &s in STRINGS.iter() {
             let enc = tok.encode(s);
             let dec = tok.decode(&enc);
@@ -188,7 +210,7 @@ mod tests {
         let s = fs::read_to_string("shakespeare.txt").unwrap();
         let s0 = Instant::now();
         let start = Instant::now();
-        let tok = Tokenizer::train(&s, &[], Some(10000));
+        let tok: Tokenizer = Tokenizer::train(&s, &[], Some(10000));
         println!("trained in {:?}", Instant::now() - start);
         let start = Instant::now();
         let enc = tok.encode(&s);
@@ -201,7 +223,7 @@ mod tests {
         println!(
             "original byte len: {}, encoded byte len: {}",
             s.len(),
-            enc.len() * 2
+            enc.len() * size_of::<Token>()
         )
     }
 
@@ -210,7 +232,7 @@ mod tests {
         let s = fs::read_to_string("big.txt").unwrap();
         let s0 = Instant::now();
         let start = Instant::now();
-        let tok = Tokenizer::train(&s, &["[PAD]", "[BOS]", "[EOS]"], Some(10000));
+        let tok: Tokenizer = Tokenizer::train(&s, &["[PAD]", "[BOS]", "[EOS]"], Some(10000));
         println!("trained in {:?}", Instant::now() - start);
         let start = Instant::now();
         let enc = tok.encode(&s);
@@ -219,7 +241,7 @@ mod tests {
         assert!(tok.save(Path::new("tok.json")).is_ok());
         println!("saved in {:?}", Instant::now() - start);
         let start = Instant::now();
-        let tok = Tokenizer::load(Path::new("tok.json")).unwrap();
+        let tok: Tokenizer = Tokenizer::load(Path::new("tok.json")).unwrap();
         println!("loaded in {:?}", Instant::now() - start);
         let start = Instant::now();
         let dec = tok.decode(&enc);
@@ -229,13 +251,13 @@ mod tests {
         println!(
             "original byte len: {}, encoded byte len: {}",
             s.len(),
-            enc.len() * 2
+            enc.len() * size_of::<Token>()
         )
     }
 
     #[test]
     fn byte_fallback() {
-        let tok = Tokenizer::train(&STRINGS.concat(), &["[PAD]"], None);
+        let tok: Tokenizer = Tokenizer::train(&STRINGS.concat(), &["[PAD]"], None);
         let s = "龍";
         // assert_eq!("<e9><be><8d>", tok.decode(&tok.encode(s)));
         assert_eq!(s, tok.decode(&tok.encode(s)));

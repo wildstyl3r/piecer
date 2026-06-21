@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::Token;
+use crate::TokenType;
 
 #[derive(Serialize)]
 pub(crate) struct Export<'a> {
@@ -14,13 +14,13 @@ pub(crate) struct Import {
     pub vocabulary: Vec<String>,
 }
 
-pub(crate) enum ProtoToken {
+pub(crate) enum ProtoToken<T> {
     Pair(usize, usize),
-    Token(Token),
+    Token(T),
 }
 
-impl ProtoToken {
-    pub fn pieces(&self, as_token: Token, tokens: &[String], protostack: &[ProtoToken]) -> String {
+impl<T: TokenType> ProtoToken<T> {
+    pub fn pieces(&self, as_token: T, tokens: &[String], protostack: &[ProtoToken<T>]) -> String {
         match self {
             ProtoToken::Pair(a, b) => {
                 let mut result = String::new();
@@ -34,12 +34,12 @@ impl ProtoToken {
                             stack.push(b);
                             stack.push(a);
                         }
-                        ProtoToken::Token(t) => result += &tokens[*t as usize],
+                        ProtoToken::Token(t) => result += &tokens[t.to_index()],
                     }
                 }
                 result
             }
-            ProtoToken::Token(_) => String::from(&tokens[as_token as usize]),
+            ProtoToken::Token(_) => String::from(&tokens[as_token.to_index()]),
         }
     }
 }
