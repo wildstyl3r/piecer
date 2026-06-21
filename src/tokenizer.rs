@@ -15,6 +15,7 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     Token,
+    error::TokenizerError,
     prepare::{chunks, denormalize, normalize},
     tokenizer::{
         arena_list::ArenaList,
@@ -33,16 +34,71 @@ static BYTES: [u8; 256] = {
     arr
 };
 
+/// Construct via [`Tokenizer::train`] or [`Tokenizer::load`]. Use by calling [`encode`](Tokenizer::encode)
+/// / [`decode`](Tokenizer::decode) or inspect the vocabulary with
+/// [`Tokenizer::vocab_size`], [`Tokenizer::token_to_string`], [`Tokenizer::str_to_token`], and [`Tokenizer::tokens`].
+///
+/// # Token representation
+///
+/// Tokens are `u16` values. Tokens `0..256` correspond to single bytes (with printable
+/// ASCII mapped to their character representation and control/high bytes to `<hex>` notation). 257th token is the word-start symbol `▁`.
+/// Tokens `257..` are special tokens, plus Unicode codepoints extracted from the training data, plus those learned by BPE merges (if any).
+#[non_exhaustive]
 pub struct Tokenizer {
     token2str: Vec<String>,
     str2token_ac: DoubleArrayAhoCorasick<Token>,
 }
 
 impl Tokenizer {
-    pub fn load(path: &Path) -> std::io::Result<Self> {
+    /// Returns the total vocabulary size (byte tokens + codepoint + BPE merge tokens).
+    pub fn vocab_size(&self) -> usize {
+        self.token2str.len()
+    }
+
+    /// Maps a token ID to its string representation.
+    ///
+    /// Returns `None` if the token ID exceeds the vocabulary range.
+    /// For byte tokens `0..256`, this returns the byte's display form
+    /// (printable ASCII as-is, others as `<hex>`).
+    pub fn token_to_string(&self, tok: Token) -> Option<&str> {
+        self.token2str.get(tok as usize).map(|s| s.as_str())
+    }
+
+    /// Maps a string to its token ID, if the string corresponds to a single token.
+    ///
+    /// Returns `None` if the string is not present as an atomic vocabulary entry.
+    /// Note that multi-token sequences (e.g. `"hello world"`) will not match —
+    /// this only succeeds when the entire input maps to exactly one token.
+    pub fn str_to_token(&self, s: &str) -> Option<Token> {
+        let mut it = self.str2token_ac.leftmost_find_iter(s).map(|m| m.value());
+        match (it.next(), it.next()) {
+            (Some(tok), None) => {
+                if self.token2str[tok as usize] == s {
+                    Some(tok)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Iterates over all `(token_id, string)` pairs in the vocabulary.
+    ///
+    /// Byte tokens come first (0..256), followed by sorted Unicode codepoints
+    /// and BPE merge tokens in merge order.
+    pub fn tokens(&self) -> impl Iterator<Item = (Token, &str)> {
+        self.token2str
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i as Token, s.as_str()))
+    }
+
+    /// Loads a tokenizer from a JSON file previously saved with [`Tokenizer::save`].
+    pub fn load(path: &Path) -> Result<Self, TokenizerError> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let external: Import = serde_json::from_reader(reader).map_err(std::io::Error::other)?;
+        let external: Import = serde_json::from_reader(reader)?;
 
         Ok(Self {
             str2token_ac: DoubleArrayAhoCorasickBuilder::new()
@@ -50,6 +106,7 @@ impl Tokenizer {
                 .build(
                     (0..256)
                         .map(|i| &BYTES[i..=i])
+                        .chain(std::iter::once("▁".as_bytes()))
                         .chain(external.vocabulary.iter().map(|tok| tok.as_bytes())),
                 )
                 .unwrap(),
@@ -63,26 +120,41 @@ impl Tokenizer {
                 })
                 .chain((0x20u8..0x7f).map(|b| (b as char).to_string()))
                 .chain((0x7f..=0xffu8).map(|b| format!("<{:02x}>", b)))
+                .chain(std::iter::once("▁".to_string()))
                 .chain(external.vocabulary)
                 .collect::<Vec<_>>(),
         })
     }
 
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+    /// Saves the tokenizer vocabulary to a JSON file.
+    ///
+    /// Only the learned vocabulary (257..) is stored; the first 256 byte-tokens plus word-start `▁`
+    /// are implicit. The file also records the crate version for forward compatibility.
+    pub fn save(&self, path: &Path) -> Result<(), TokenizerError> {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
         serde_json::to_writer_pretty(
             writer,
             &Export {
                 version: env!("CARGO_PKG_VERSION"),
-                vocabulary: &self.token2str[256..],
+                vocabulary: &self.token2str[257..],
             },
-        )
-        .map_err(std::io::Error::other)?;
+        )?;
         Ok(())
     }
 
-    pub fn train(s: &str, vocab_size: Option<usize>) -> Self {
+    /// Trains a new BPE tokenizer on the given text.
+    ///
+    /// The initial vocabulary always contains 257 initial tokens (256 single bytes plus the word start symbol `▁`),
+    /// in addition to the provided special tokens.
+    ///
+    /// In case `max_extra_tokens` is `Some(n)`, other unicode codepoints found in `s` are appended
+    /// to the vocabulary first, and then BPE merge operations are applied until the vocabulary
+    /// reaches `257 + special_tokens.len() + n` entries.
+    ///
+    /// If n is less than the number of unicode codepoints, then only the top-n are appended
+    /// from those in `s`, sorted longest-first, then lexicographically.
+    pub fn train(s: &str, special_tokens: &[&str], max_extra_tokens: Option<usize>) -> Self {
         let mut alphabet: Vec<_> = (0..0x20u8)
             .map(|b| {
                 if b == b'\t' || b == b'\n' || b == b'\r' {
@@ -93,23 +165,25 @@ impl Tokenizer {
             })
             .chain((0x20u8..0x7f).map(|b| (b as char).to_string()))
             .chain((0x7f..=0xffu8).map(|b| format!("<{:02x}>", b)))
+            .chain(std::iter::once("▁".to_string()))
             .collect();
         let mut extension = s
             .chars()
             .filter(|c| c.len_utf8() > 1)
-            .fold(
-                HashSet::<String>::from(
-                    ["▁", "[UNK]", "[PAD]", "[BOS]", "[EOS]"].map(|s| s.to_string()),
-                ),
-                |mut acc, c| {
-                    acc.insert(c.to_string());
-                    acc
-                },
-            )
+            .fold(HashSet::<String>::new(), |mut acc, c| {
+                acc.insert(c.to_string());
+                acc
+            })
             .into_iter()
             .collect::<Vec<_>>();
-        extension.sort();
-        alphabet.extend(extension);
+        extension.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b))); //longest-first, then alphabetically
+        alphabet.extend(
+            special_tokens.iter().map(|&s| s.to_string()).chain(
+                extension
+                    .into_iter()
+                    .take(max_extra_tokens.unwrap_or(usize::MAX)),
+            ),
+        );
 
         let mut tokenizer = Self {
             str2token_ac: DoubleArrayAhoCorasickBuilder::new()
@@ -126,7 +200,7 @@ impl Tokenizer {
             .map(|i| ProtoToken::Token(i as Token))
             .collect();
 
-        if let Some(vocab_size) = vocab_size {
+        if let Some(extra_tokens) = max_extra_tokens {
             let mut str2id = HashMap::new();
             let mut pieces: Vec<(ArenaList, u32)> =
                 chunks(&normalize(s))
@@ -137,8 +211,7 @@ impl Tokenizer {
                             pieces
                         } else {
                             let id = str2id.len() as u32;
-                            let piece: ArenaList =
-                                tokenizer.encode_normalized(str_chunk).iter().collect();
+                            let piece: ArenaList = tokenizer.encode_normalized(str_chunk).collect();
                             pieces.push((piece, 1));
                             str2id.insert(str_chunk, id);
                             pieces
@@ -167,7 +240,7 @@ impl Tokenizer {
 
             let mut decrements: FxHashMap<(u16, u16), u32> = FxHashMap::default();
             let mut addons: FxHashMap<(u16, u16), Vec<(usize, usize)>> = FxHashMap::default();
-            while protostack.len() < vocab_size {
+            while protostack.len() - 257 < extra_tokens {
                 match pq_counts.pop() {
                     Some((pair, _)) => {
                         let token = protostack.len() as Token;
@@ -253,15 +326,20 @@ impl Tokenizer {
         tokenizer
     }
 
-    fn encode_normalized(&self, s: &str) -> Vec<Token> {
+    fn encode_normalized(&self, s: &str) -> impl Iterator<Item = Token> {
         self.str2token_ac
             .leftmost_find_iter(s)
             .map(|mat| mat.value())
-            .collect()
     }
 
+    /// Encodes a string into a sequence of token IDs.
+    ///
+    /// The input is first normalized, then chunked by a GPT-style regex pattern,
+    /// and each chunk is matched against the vocabulary using leftmost-longest
+    /// Aho-Corasick search. Characters not in the vocabulary fall back to their
+    /// UTF-8 byte tokens.
     pub fn encode(&self, s: &str) -> Vec<Token> {
-        self.encode_normalized(&normalize(s))
+        self.encode_normalized(&normalize(s)).collect()
     }
 
     fn decode_normalized(&self, v: &[Token]) -> String {
@@ -294,6 +372,11 @@ impl Tokenizer {
         result
     }
 
+    /// Decodes a sequence of token IDs back into a string.
+    ///
+    /// Consecutive byte tokens that form valid UTF-8 are reassembled into
+    /// characters. The result is then denormalized (removing or converting `▁` markers
+    /// back to spaces where appropriate).
     pub fn decode(&self, v: &[Token]) -> String {
         denormalize(&self.decode_normalized(v))
     }

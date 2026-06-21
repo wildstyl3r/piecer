@@ -1,7 +1,7 @@
 use crate::Token;
 
 #[derive(Debug, Eq)]
-pub struct PairOrd(pub u32, pub (Token, Token));
+pub(crate) struct PairOrd(pub u32, pub (Token, Token));
 impl PairOrd {
     fn len(&self) -> usize {
         self.0 as usize

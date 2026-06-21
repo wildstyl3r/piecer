@@ -1,10 +1,65 @@
 /*!
-Unicode codepoint-based BPE tokenizer with byte fallback
+A tokenizer operating on Unicode codepoints. Supports automatic byte-fallback
+for out-of-vocabulary characters and with optional [BPE](https://en.wikipedia.org/wiki/Byte_pair_encoding)
+merging mode.
 
+The core vocabulary always includes the full byte range (`0x00`–`0xff`), special token `▁` plus
+any multi-byte Unicode codepoints found in the training data. During encoding,
+any input that cannot be mapped to multi-byte vocabulary elements decomposes
+into a sequence of single-byte tokens. On decoding, consecutive byte tokens
+that form valid UTF-8 are reassembled into characters; invalid sequences
+render as `<hex>` notation (e.g. `<e9><be><8d>`).
 
-*/
+Unicode letters, digits, whitespace characters and "any symbols not belonging to these types"
+are guaranteed to never be mixed during a token merge. Words and standalone numbers are prepended by a
+special symbol `▁` internally to indicate a word or a number start. Numbers are split into parts consisting
+of no more than 3 digits. and optionally `▁`, if it is in the beginning of the number.
+
+# Quick start
+
+```
+use piecer::Tokenizer;
+
+// Train a tokenizer with up to 512 merge operations
+let tok = Tokenizer::train("hello world", &["[PAD]"], Some(512));
+
+let tokens = tok.encode("hello world");
+let decoded = tok.decode(&tokens);
+assert_eq!("hello world", decoded);
+```
+
+# Byte fallback
+
+Characters absent from the training vocabulary are encoded as their UTF-8
+byte tokens and transparently reassembled on decode:
+
+```
+use piecer::Tokenizer;
+
+let tok = Tokenizer::train("hello", &[], Some(512));
+let tokens = tok.encode("龍");  // U+9F8D — not in training data
+assert_eq!("龍", tok.decode(&tokens));  // reassembled from <e9><be><8d>
+ ```
+
+# Persistence
+
+```
+use piecer::Tokenizer;
+use std::path::Path;
+
+let tok = Tokenizer::train("some training text", &[], Some(512));
+tok.save(Path::new("my_tokenizer.json")).unwrap();
+let loaded = Tokenizer::load(Path::new("my_tokenizer.json")).unwrap();
+assert_eq!(tok.vocab_size(), loaded.vocab_size());
+```
+
+ */
+
+mod error;
 mod prepare;
 pub mod tokenizer;
+
+pub use crate::tokenizer::Tokenizer;
 
 pub type Token = u16;
 
@@ -105,7 +160,7 @@ mod tests {
 
     #[test]
     fn codepoint2token() {
-        let tok = Tokenizer::train(&STRINGS.concat(), None);
+        let tok = Tokenizer::train(&STRINGS.concat(), &[], None);
         for &s in STRINGS.iter() {
             let enc = tok.encode(s);
             let dec = tok.decode(&enc);
@@ -115,7 +170,7 @@ mod tests {
 
     #[test]
     fn codepoint_bpe() {
-        let tok = Tokenizer::train(&STRINGS.concat(), Some(512));
+        let tok = Tokenizer::train(&STRINGS.concat(), &[], Some(512));
         for &s in STRINGS.iter() {
             let enc = tok.encode(s);
             let dec = tok.decode(&enc);
@@ -133,7 +188,7 @@ mod tests {
         let s = fs::read_to_string("shakespeare.txt").unwrap();
         let s0 = Instant::now();
         let start = Instant::now();
-        let tok = Tokenizer::train(&s, Some(10000));
+        let tok = Tokenizer::train(&s, &[], Some(10000));
         println!("trained in {:?}", Instant::now() - start);
         let start = Instant::now();
         let enc = tok.encode(&s);
@@ -155,7 +210,7 @@ mod tests {
         let s = fs::read_to_string("big.txt").unwrap();
         let s0 = Instant::now();
         let start = Instant::now();
-        let tok = Tokenizer::train(&s, Some(10000));
+        let tok = Tokenizer::train(&s, &["[PAD]", "[BOS]", "[EOS]"], Some(10000));
         println!("trained in {:?}", Instant::now() - start);
         let start = Instant::now();
         let enc = tok.encode(&s);
@@ -180,7 +235,7 @@ mod tests {
 
     #[test]
     fn byte_fallback() {
-        let tok = Tokenizer::train(&STRINGS.concat(), None);
+        let tok = Tokenizer::train(&STRINGS.concat(), &["[PAD]"], None);
         let s = "龍";
         // assert_eq!("<e9><be><8d>", tok.decode(&tok.encode(s)));
         assert_eq!(s, tok.decode(&tok.encode(s)));

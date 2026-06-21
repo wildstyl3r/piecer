@@ -93,20 +93,6 @@ impl ArenaList {
     }
 }
 
-impl Index<usize> for ArenaList {
-    type Output = ArenaNode;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.0[index]
-    }
-}
-
-impl IndexMut<usize> for ArenaList {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.0[index]
-    }
-}
-
 impl<I> FromIterator<I> for ArenaList
 where
     I: Borrow<Token>,
